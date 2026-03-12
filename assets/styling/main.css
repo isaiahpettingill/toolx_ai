@@ -1,0 +1,11 @@
+/* Global reset — all real styles live in chat.css */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+    height: 100%;
+    background: #0d0f14;
+    color: #e2e4ef;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    overflow: hidden;
+}
