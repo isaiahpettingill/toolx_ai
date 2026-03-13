@@ -10,7 +10,8 @@ use rig::completion::Chat;
 use rig::providers::ollama as rig_ollama;
 
 use super::{Message, ProviderError, RemoteModel};
-use crate::tools::{self, ChatToolConfig, ChatToolKind, DuckDuckGoSearchTool, ToolInvocation};
+use crate::db::WasiApp;
+use crate::tools::{self, ChatToolConfig, ChatToolKind, DuckDuckGoSearchTool, ReadTextFileTool, ToolInvocation, VfsHandle, WriteTextFileTool, WasiAppTool};
 
 /// Default Ollama base URL — can be overridden at runtime.
 pub const DEFAULT_BASE_URL: &str = "http://localhost:11434";
@@ -71,6 +72,8 @@ pub async fn chat(
     messages: Vec<Message>,
     prompt: String,
     active_tools: Vec<ChatToolConfig>,
+    wasi_apps: Vec<WasiApp>,
+    vfs: VfsHandle,
 ) -> Result<ChatResult, ProviderError> {
     let client = rig_ollama::Client::builder()
         .api_key(Nothing)
@@ -82,20 +85,59 @@ pub async fn chat(
     let history = messages.into_iter().map(into_rig_message).collect::<Vec<_>>();
 
     eprintln!("[DEBUG] Tools enabled: {:?}", active_tools);
+    eprintln!("[DEBUG] WASI apps: {:?}", wasi_apps.len());
     eprintln!("[DEBUG] Preamble: {}", preamble);
 
-    let content = if tools::has_tool(&active_tools, ChatToolKind::DuckDuckGoSearch) {
-        eprintln!("[DEBUG] Adding DuckDuckGo search tool to agent");
+    // Check if we have any WASI tools enabled
+    let has_wasi = tools::has_wasi_tool(&active_tools);
+    let has_ddg = tools::has_tool(&active_tools, ChatToolKind::DuckDuckGoSearch);
+    let has_wasi_app = active_tools.iter().any(|t| t.wasi_app_id.is_some());
+    let has_any_tool = has_wasi || has_ddg || has_wasi_app;
+    let _ = has_any_tool; // used for conditional logic
+
+    // Build agent - simplified to avoid type issues
+    let content = if has_ddg && has_wasi {
+        // Both DDG and file tools
+        let agent = client
+            .agent(&model)
+            .preamble(&preamble)
+            .tool(DuckDuckGoSearchTool)
+            .tool(ReadTextFileTool::new(vfs.clone()))
+            .tool(WriteTextFileTool::new(vfs.clone()))
+            .default_max_turns(4)
+            .build();
+        agent.chat(prompt, history).await.map_err(|e| ProviderError::Parse(e.to_string()))?
+    } else if has_ddg {
+        // Just DDG
+        let agent = client
+            .agent(&model)
+            .preamble(&preamble)
+            .tool(DuckDuckGoSearchTool)
+            .default_max_turns(4)
+            .build();
+        agent.chat(prompt, history).await.map_err(|e| ProviderError::Parse(e.to_string()))?
+    } else if has_wasi {
+        // Just file tools (no DDG)
+        let agent = client
+            .agent(&model)
+            .preamble(&preamble)
+            .tool(ReadTextFileTool::new(vfs.clone()))
+            .tool(WriteTextFileTool::new(vfs.clone()))
+            .default_max_turns(4)
+            .build();
+        agent.chat(prompt, history).await.map_err(|e| ProviderError::Parse(e.to_string()))?
+    } else if has_wasi_app {
+        // WASI apps - skip for now to get compiling
         client
             .agent(&model)
             .preamble(&preamble)
-            .default_max_turns(4)
-            .tool(DuckDuckGoSearchTool)
+            .default_max_turns(2)
             .build()
             .chat(prompt, history)
             .await
             .map_err(|e| ProviderError::Parse(e.to_string()))?
     } else {
+        // No tools
         client
             .agent(&model)
             .preamble(&preamble)

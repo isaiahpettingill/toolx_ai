@@ -371,6 +371,7 @@ pub fn ChatApp() -> Element {
                             active_tools: current_tools,
                             ollama_base_url,
                             wasm_models,
+                            wasi_apps,
                             streaming_chats,
                             on_open_tool_picker: move |_| tool_picker_open.set(true),
                             on_messages_changed: move |_| {

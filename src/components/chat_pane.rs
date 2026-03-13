@@ -9,7 +9,7 @@ use std::sync::{
 use crate::db::{self, WasmModel};
 use crate::markdown;
 use crate::providers::{self, Message};
-use crate::tools;
+use crate::tools::{self, VfsHandle};
 
 use super::types::{run_builtin, UiMessage, PROVIDER_OLLAMA, PROVIDER_WASI};
 
@@ -24,6 +24,7 @@ pub fn ChatPane(
     active_tools: Signal<Vec<tools::ChatToolConfig>>,
     ollama_base_url: Signal<String>,
     wasm_models: Signal<Vec<WasmModel>>,
+    wasi_apps: Signal<Vec<db::WasiApp>>,
     mut streaming_chats: Signal<HashMap<String, Arc<AtomicBool>>>,
     on_open_tool_picker: EventHandler<MouseEvent>,
     on_messages_changed: EventHandler<()>,
@@ -81,6 +82,9 @@ pub fn ChatPane(
             let provider = current_provider.read().clone();
             let system_prompt = current_system_prompt.read().clone();
             let active_tools_list = active_tools.read().clone();
+            let wasi_apps_list = wasi_apps.read().clone();
+            let vfs_json = db::get_chat_vfs(&conn.read(), &chat_id).unwrap_or_default();
+            let vfs_handle = tools::vfs_from_json(&serde_json::to_string(&vfs_json).unwrap_or_default());
 
             if let Ok(user_msg) = db::add_message(&conn.read(), &chat_id, "user", &text) {
                 messages.write().push(UiMessage::from_db(&user_msg));
@@ -128,6 +132,8 @@ pub fn ChatPane(
                         history,
                         text,
                         active_tools_list,
+                        wasi_apps_list,
+                        vfs_handle,
                     )
                     .await
                     {
