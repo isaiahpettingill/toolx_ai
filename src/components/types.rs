@@ -45,6 +45,7 @@ pub struct UiMessage {
     pub content: String,
     pub html: String,
     pub streaming: bool,
+    pub tool_label: Option<String>,
 }
 
 impl UiMessage {
@@ -60,6 +61,7 @@ impl UiMessage {
             content: msg.content.clone(),
             html,
             streaming: false,
+            tool_label: None,
         }
     }
 
@@ -70,6 +72,7 @@ impl UiMessage {
             content: String::new(),
             html: String::new(),
             streaming: true,
+            tool_label: None,
         }
     }
 }

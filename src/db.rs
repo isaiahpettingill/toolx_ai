@@ -14,6 +14,7 @@ pub struct ChatSummary {
     /// e.g. "builtin" | "ollama"
     pub provider: String,
     pub system_prompt: String,
+    pub tools_json: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -119,6 +120,7 @@ fn init_schema(conn: Connection) -> Result<Connection> {
             model         TEXT NOT NULL DEFAULT 'echo:0b',
             provider      TEXT NOT NULL DEFAULT 'builtin',
             system_prompt TEXT NOT NULL DEFAULT '',
+            tools_json    TEXT NOT NULL DEFAULT '[]',
             created_at    TEXT NOT NULL,
             updated_at    TEXT NOT NULL
         );
@@ -144,6 +146,8 @@ fn init_schema(conn: Connection) -> Result<Connection> {
     conn.execute_batch("ALTER TABLE chats ADD COLUMN provider TEXT NOT NULL DEFAULT 'builtin';")
         .ok();
     conn.execute_batch("ALTER TABLE chats ADD COLUMN system_prompt TEXT NOT NULL DEFAULT '';")
+        .ok();
+    conn.execute_batch("ALTER TABLE chats ADD COLUMN tools_json TEXT NOT NULL DEFAULT '[]';")
         .ok();
     Ok(conn)
 }
@@ -171,7 +175,7 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
 
 pub fn list_chats(conn: &Connection) -> Result<Vec<ChatSummary>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, model, provider, system_prompt, created_at, updated_at FROM chats ORDER BY updated_at DESC",
+        "SELECT id, title, model, provider, system_prompt, tools_json, created_at, updated_at FROM chats ORDER BY updated_at DESC",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(ChatSummary {
@@ -180,8 +184,9 @@ pub fn list_chats(conn: &Connection) -> Result<Vec<ChatSummary>> {
             model: row.get(2)?,
             provider: row.get(3)?,
             system_prompt: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            tools_json: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
         })
     })?;
     rows.collect()
@@ -196,7 +201,7 @@ pub fn create_chat(
     let now = Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT INTO chats (id, title, model, provider, system_prompt, created_at, updated_at) VALUES (?1,?2,?3,?4,'',?5,?6)",
+        "INSERT INTO chats (id, title, model, provider, system_prompt, tools_json, created_at, updated_at) VALUES (?1,?2,?3,?4,'','[]',?5,?6)",
         params![id, title, model, provider, now, now],
     )?;
     Ok(ChatSummary {
@@ -205,6 +210,7 @@ pub fn create_chat(
         model: model.to_string(),
         provider: provider.to_string(),
         system_prompt: String::new(),
+        tools_json: "[]".to_string(),
         created_at: now.clone(),
         updated_at: now,
     })
@@ -287,6 +293,14 @@ pub fn update_chat_system_prompt(conn: &Connection, chat_id: &str, prompt: &str)
     conn.execute(
         "UPDATE chats SET system_prompt=?1 WHERE id=?2",
         params![prompt, chat_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_chat_tools(conn: &Connection, chat_id: &str, tools_json: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE chats SET tools_json=?1 WHERE id=?2",
+        params![tools_json, chat_id],
     )?;
     Ok(())
 }

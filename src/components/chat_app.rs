@@ -4,10 +4,12 @@ use std::sync::{atomic::AtomicBool, Arc};
 
 use crate::db::{self, ChatSummary, WasmModel};
 use crate::providers;
+use crate::tools::{parse_tool_configs, serialize_tool_configs, ChatToolConfig, ChatToolKind};
 
 use super::chat_pane::ChatPane;
 use super::model_selector::ModelSelector;
 use super::provider_config::{ColorPicker, ProviderConfigPanel};
+use super::tool_picker::ToolPickerModal;
 use super::types::{UiMessage, PROVIDER_BUILTIN};
 
 const CHAT_CSS: Asset = asset!("/assets/styling/chat.css");
@@ -54,6 +56,7 @@ pub fn ChatApp() -> Element {
     let mut current_model = use_signal(|| "echo:0b".to_string());
     let mut current_provider = use_signal(|| PROVIDER_BUILTIN.to_string());
     let mut current_system_prompt = use_signal(String::new);
+    let mut current_tools: Signal<Vec<ChatToolConfig>> = use_signal(Vec::new);
 
     // Per-chat streaming cancel tokens. Presence = that chat is actively streaming.
     let streaming_chats: Signal<HashMap<String, Arc<AtomicBool>>> = use_signal(HashMap::new);
@@ -61,6 +64,7 @@ pub fn ChatApp() -> Element {
 
     let mut drawer_open = use_signal(|| false);
     let mut provider_config_open = use_signal(|| false);
+    let mut tool_picker_open = use_signal(|| false);
 
     let mut renaming_id: Signal<Option<String>> = use_signal(|| None);
     let mut rename_buf = use_signal(|| String::new());
@@ -79,7 +83,12 @@ pub fn ChatApp() -> Element {
                 current_model.set(chat.model.clone());
                 current_provider.set(chat.provider.clone());
                 current_system_prompt.set(chat.system_prompt.clone());
+                current_tools.set(parse_tool_configs(&chat.tools_json));
             }
+        } else {
+            messages.set(Vec::new());
+            current_system_prompt.set(String::new());
+            current_tools.set(Vec::new());
         }
     });
 
@@ -95,9 +104,31 @@ pub fn ChatApp() -> Element {
                     active_chat_id.set(Some(id));
                     messages.set(Vec::new());
                     current_system_prompt.set(String::new());
+                    current_tools.set(Vec::new());
                     drawer_open.set(false);
                 }
                 Err(e) => eprintln!("Failed to create chat: {e}"),
+            }
+        }
+    };
+
+    let toggle_tool = {
+        let conn = conn.clone();
+        let active_chat_id = active_chat_id.clone();
+        move |tool_kind: ChatToolKind| {
+            let mut next_tools = current_tools.read().clone();
+            if let Some(index) = next_tools.iter().position(|tool| tool.kind == tool_kind) {
+                next_tools.remove(index);
+            } else {
+                next_tools.push(ChatToolConfig::new(tool_kind));
+            }
+
+            let tools_json = serialize_tool_configs(&next_tools);
+            current_tools.set(next_tools);
+
+            if let Some(chat_id) = active_chat_id() {
+                db::update_chat_tools(&conn.read(), &chat_id, &tools_json).ok();
+                chats.set(db::list_chats(&conn.read()).unwrap_or_default());
             }
         }
     };
@@ -174,6 +205,7 @@ pub fn ChatApp() -> Element {
                                                 current_model.set(c.model.clone());
                                                 current_provider.set(c.provider.clone());
                                                 current_system_prompt.set(c.system_prompt.clone());
+                                                current_tools.set(parse_tool_configs(&c.tools_json));
                                             }
                                             active_chat_id.set(Some(chat_id.clone()));
                                             drawer_open.set(false);
@@ -234,14 +266,18 @@ pub fn ChatApp() -> Element {
                                                         if active_chat_id.read().as_deref() == Some(&chat_id3) {
                                                             let first = chats.read().first().map(|c| c.id.clone());
                                                             active_chat_id.set(first.clone());
-                                                            if let Some(new_id) = &first {
-                                                                let msgs = db::get_messages(&conn.read(), new_id).unwrap_or_default();
-                                                                messages.set(msgs.iter().map(UiMessage::from_db).collect());
-                                                            } else {
-                                                                messages.set(Vec::new());
-                                                            }
-                                                        }
-                                                    },
+                                                             if let Some(new_id) = &first {
+                                                                 let msgs = db::get_messages(&conn.read(), new_id).unwrap_or_default();
+                                                                 messages.set(msgs.iter().map(UiMessage::from_db).collect());
+                                                                 if let Some(chat) = chats.read().iter().find(|c| &c.id == new_id) {
+                                                                     current_tools.set(parse_tool_configs(&chat.tools_json));
+                                                                 }
+                                                             } else {
+                                                                 messages.set(Vec::new());
+                                                                 current_tools.set(Vec::new());
+                                                             }
+                                                         }
+                                                     },
                                                     svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
                                                         fill: "none", stroke: "currentColor", stroke_width: "2",
                                                         width: "13", height: "13",
@@ -303,9 +339,11 @@ pub fn ChatApp() -> Element {
                             current_model,
                             current_provider,
                             current_system_prompt,
+                            active_tools: current_tools,
                             ollama_base_url,
                             wasm_models,
                             streaming_chats,
+                            on_open_tool_picker: move |_| tool_picker_open.set(true),
                             on_messages_changed: move |_| {
                                 chats.set(db::list_chats(&conn.read()).unwrap_or_default());
                             },
@@ -333,6 +371,14 @@ pub fn ChatApp() -> Element {
                         ollama_base_url,
                         wasm_models,
                         on_close: move |_| provider_config_open.set(false),
+                    }
+                }
+
+                if tool_picker_open() {
+                    ToolPickerModal {
+                        active_tools: current_tools(),
+                        on_toggle_tool: toggle_tool,
+                        on_close: move |_| tool_picker_open.set(false),
                     }
                 }
             }

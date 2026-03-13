@@ -9,6 +9,7 @@ use std::sync::{
 use crate::db::{self, WasmModel};
 use crate::markdown;
 use crate::providers::{self, Message};
+use crate::tools;
 
 use super::types::{run_builtin, UiMessage, PROVIDER_OLLAMA, PROVIDER_WASI};
 
@@ -20,30 +21,30 @@ pub fn ChatPane(
     current_model: Signal<String>,
     current_provider: Signal<String>,
     mut current_system_prompt: Signal<String>,
+    active_tools: Signal<Vec<tools::ChatToolConfig>>,
     ollama_base_url: Signal<String>,
     wasm_models: Signal<Vec<WasmModel>>,
     mut streaming_chats: Signal<HashMap<String, Arc<AtomicBool>>>,
+    on_open_tool_picker: EventHandler<MouseEvent>,
     on_messages_changed: EventHandler<()>,
 ) -> Element {
     let mut input = use_signal(String::new);
 
-    // Is *this* chat currently streaming?
     let is_streaming = streaming_chats.read().contains_key(&chat_id);
 
-    // System prompt editor state
     let mut sys_prompt_open = use_signal(|| false);
     let mut sys_prompt_draft = use_signal(|| current_system_prompt.read().clone());
 
-    // Keep draft in sync when we switch chats
     use_effect(move || {
         sys_prompt_draft.set(current_system_prompt.read().clone());
     });
 
-    // Scroll to bottom whenever message count changes
     let msg_count = messages.read().len();
     use_effect(move || {
-        let _ = msg_count; // read it so effect re-runs on change
-        let _ = eval("var a=document.getElementById('scroll-anchor');if(a)a.scrollIntoView({behavior:'smooth'});");
+        let _ = msg_count;
+        let _ = eval(
+            "var a=document.getElementById('scroll-anchor');if(a)a.scrollIntoView({behavior:'smooth'});",
+        );
     });
 
     let commit_sys_prompt = {
@@ -77,6 +78,7 @@ pub fn ChatPane(
             let model = current_model.read().clone();
             let provider = current_provider.read().clone();
             let system_prompt = current_system_prompt.read().clone();
+            let active_tools_list = active_tools.read().clone();
 
             if let Ok(user_msg) = db::add_message(&conn.read(), &chat_id, "user", &text) {
                 messages.write().push(UiMessage::from_db(&user_msg));
@@ -90,23 +92,15 @@ pub fn ChatPane(
             input.set(String::new());
 
             if provider == PROVIDER_OLLAMA {
-                let mut history: Vec<Message> = Vec::new();
-                if !system_prompt.is_empty() {
-                    history.push(Message {
-                        role: "system".to_string(),
-                        content: system_prompt,
-                    });
-                }
-                history.extend(
-                    messages
-                        .read()
-                        .iter()
-                        .filter(|m| !m.streaming)
-                        .map(|m| Message {
-                            role: m.role.clone(),
-                            content: m.content.clone(),
-                        }),
-                );
+                let history: Vec<Message> = messages
+                    .read()
+                    .iter()
+                    .filter(|m| !m.streaming)
+                    .map(|m| Message {
+                        role: m.role.clone(),
+                        content: m.content.clone(),
+                    })
+                    .collect();
 
                 let base_url = ollama_base_url.read().clone();
                 let stream_id = uuid::Uuid::new_v4().to_string();
@@ -118,67 +112,66 @@ pub fn ChatPane(
                 let conn2 = conn.clone();
                 let chat_id2 = chat_id.clone();
                 spawn(async move {
-                    let mut rx = providers::ollama::chat_stream(base_url, model, history);
-                    let mut full_content = String::new();
+                    if cancel.load(Ordering::Relaxed) {
+                        messages.write().retain(|m| m.id != stream_id);
+                        streaming_chats.write().remove(&chat_id2);
+                        on_messages_changed.call(());
+                        return;
+                    }
 
-                    loop {
-                        if cancel.load(Ordering::Relaxed) {
-                            if !full_content.is_empty() {
-                                if let Ok(saved) = db::add_message(
-                                    &conn2.read(), &chat_id2, "assistant", &full_content,
-                                ) {
-                                    if let Some(msg) = messages.write().iter_mut().find(|m| m.id == stream_id) {
-                                        msg.id = saved.id;
-                                        msg.streaming = false;
-                                    }
-                                }
-                            } else {
-                                messages.write().retain(|m| m.id != stream_id);
-                            }
-                            streaming_chats.write().remove(&chat_id2);
-                            on_messages_changed.call(());
-                            return;
-                        }
-
-                        match rx.recv().await {
-                            Some(Ok(token)) => {
-                                full_content.push_str(&token);
-                                let html = markdown::render(&full_content);
-                                if let Some(msg) = messages.write().iter_mut().find(|m| m.id == stream_id) {
+                    match providers::ollama::chat(
+                        base_url,
+                        model,
+                        system_prompt,
+                        history,
+                        text,
+                        active_tools_list,
+                    )
+                    .await
+                    {
+                        Ok(full_content) => {
+                            if let Ok(saved) =
+                                db::add_message(&conn2.read(), &chat_id2, "assistant", &full_content)
+                            {
+                                if let Some(msg) =
+                                    messages.write().iter_mut().find(|m| m.id == stream_id)
+                                {
+                                    msg.id = saved.id;
                                     msg.content = full_content.clone();
-                                    msg.html = html;
-                                }
-                            }
-                            Some(Err(e)) => {
-                                let err_html = format!("<span style='color:#e03131'>Error: {e}</span>");
-                                if let Some(msg) = messages.write().iter_mut().find(|m| m.id == stream_id) {
-                                    msg.html = err_html;
+                                    msg.html = markdown::render(&full_content);
                                     msg.streaming = false;
                                 }
-                                streaming_chats.write().remove(&chat_id2);
-                                on_messages_changed.call(());
-                                return;
                             }
-                            None => break,
+                        }
+                        Err(e) => {
+                            let rendered = format!("Error: {e}");
+                            if let Ok(saved) =
+                                db::add_message(&conn2.read(), &chat_id2, "assistant", &rendered)
+                            {
+                                if let Some(msg) =
+                                    messages.write().iter_mut().find(|m| m.id == stream_id)
+                                {
+                                    msg.id = saved.id;
+                                    msg.content = rendered.clone();
+                                    msg.html =
+                                        format!("<span style='color:#e03131'>{rendered}</span>");
+                                    msg.streaming = false;
+                                }
+                            }
                         }
                     }
 
-                    if let Ok(saved) = db::add_message(&conn2.read(), &chat_id2, "assistant", &full_content) {
-                        if let Some(msg) = messages.write().iter_mut().find(|m| m.id == stream_id) {
-                            msg.id = saved.id;
-                            msg.streaming = false;
-                        }
-                    }
                     streaming_chats.write().remove(&chat_id2);
                     on_messages_changed.call(());
                 });
             } else if provider == PROVIDER_WASI {
-                // Look up the wasm bytes for the selected model ID.
                 let wasm_entry = wasm_models.read().iter().find(|m| m.id == model).cloned();
                 match wasm_entry {
                     None => {
-                        let err = format!("WASI module '{}' not found. Upload it in Provider Settings.", model);
-                        if let Ok(asst_msg) = db::add_message(&conn.read(), &chat_id, "assistant", &err) {
+                        let err =
+                            format!("WASI module '{}' not found. Upload it in Provider Settings.", model);
+                        if let Ok(asst_msg) = db::add_message(&conn.read(), &chat_id, "assistant", &err)
+                        {
                             messages.write().push(UiMessage::from_db(&asst_msg));
                         }
                         on_messages_changed.call(());
@@ -222,9 +215,16 @@ pub fn ChatPane(
                                 if cancel.load(Ordering::Relaxed) {
                                     if !full_content.is_empty() {
                                         if let Ok(saved) = db::add_message(
-                                            &conn2.read(), &chat_id2, "assistant", &full_content,
+                                            &conn2.read(),
+                                            &chat_id2,
+                                            "assistant",
+                                            &full_content,
                                         ) {
-                                            if let Some(msg) = messages.write().iter_mut().find(|m| m.id == stream_id) {
+                                            if let Some(msg) = messages
+                                                .write()
+                                                .iter_mut()
+                                                .find(|m| m.id == stream_id)
+                                            {
                                                 msg.id = saved.id;
                                                 msg.streaming = false;
                                             }
@@ -241,14 +241,23 @@ pub fn ChatPane(
                                     Some(Ok(token)) => {
                                         full_content.push_str(&token);
                                         let html = markdown::render(&full_content);
-                                        if let Some(msg) = messages.write().iter_mut().find(|m| m.id == stream_id) {
+                                        if let Some(msg) = messages
+                                            .write()
+                                            .iter_mut()
+                                            .find(|m| m.id == stream_id)
+                                        {
                                             msg.content = full_content.clone();
                                             msg.html = html;
                                         }
                                     }
                                     Some(Err(e)) => {
-                                        let err_html = format!("<span style='color:#e03131'>WASI Error: {e}</span>");
-                                        if let Some(msg) = messages.write().iter_mut().find(|m| m.id == stream_id) {
+                                        let err_html =
+                                            format!("<span style='color:#e03131'>WASI Error: {e}</span>");
+                                        if let Some(msg) = messages
+                                            .write()
+                                            .iter_mut()
+                                            .find(|m| m.id == stream_id)
+                                        {
                                             msg.html = err_html;
                                             msg.streaming = false;
                                         }
@@ -260,8 +269,12 @@ pub fn ChatPane(
                                 }
                             }
 
-                            if let Ok(saved) = db::add_message(&conn2.read(), &chat_id2, "assistant", &full_content) {
-                                if let Some(msg) = messages.write().iter_mut().find(|m| m.id == stream_id) {
+                            if let Ok(saved) =
+                                db::add_message(&conn2.read(), &chat_id2, "assistant", &full_content)
+                            {
+                                if let Some(msg) =
+                                    messages.write().iter_mut().find(|m| m.id == stream_id)
+                                {
                                     msg.id = saved.id;
                                     msg.streaming = false;
                                 }
@@ -273,7 +286,8 @@ pub fn ChatPane(
                 }
             } else {
                 let response_text = run_builtin(&model, &text);
-                if let Ok(asst_msg) = db::add_message(&conn.read(), &chat_id, "assistant", &response_text) {
+                if let Ok(asst_msg) = db::add_message(&conn.read(), &chat_id, "assistant", &response_text)
+                {
                     messages.write().push(UiMessage::from_db(&asst_msg));
                 }
                 on_messages_changed.call(());
@@ -284,7 +298,6 @@ pub fn ChatPane(
     rsx! {
         div { id: "chat-pane",
 
-            // ── System prompt bar ──────────────────────────────────────────
             div { id: "system-prompt-bar",
                 button {
                     id: "system-prompt-toggle",
@@ -342,7 +355,6 @@ pub fn ChatPane(
                 }
             }
 
-            // ── Messages ───────────────────────────────────────────────────
             div { id: "chat-messages",
                 if messages.read().is_empty() {
                     div { id: "chat-empty",
@@ -389,10 +401,6 @@ pub fn ChatPane(
                                             class: "msg-action-btn",
                                             title: "Copy markdown",
                                             onclick: move |_| {
-                                                // navigator.clipboard requires a secure context (HTTPS)
-                                                // which is unavailable in Android WebViews. Fall back to
-                                                // the legacy execCommand approach when the Clipboard API
-                                                // is not available (e.g. on Android).
                                                 let js_text = serde_json::to_string(&raw_content).unwrap_or_default();
                                                 let _ = eval(&format!(
                                                     r#"(function(t){{
@@ -430,8 +438,34 @@ pub fn ChatPane(
                 div { id: "scroll-anchor" }
             }
 
-            // ── Input area ─────────────────────────────────────────────────
             div { id: "chat-input-area",
+                div { id: "chat-tools-row",
+                    button {
+                        id: "chat-tools-trigger",
+                        title: "Add tools to this chat",
+                        onclick: move |event| on_open_tool_picker.call(event),
+                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                            fill: "none", stroke: "currentColor", stroke_width: "2",
+                            width: "15", height: "15",
+                            path { d: "M12 5v14" }
+                            path { d: "M5 12h14" }
+                        }
+                        span { "Tools" }
+                    }
+
+                    div { id: "chat-tools-chips",
+                        if active_tools.read().is_empty() {
+                            span { class: "chat-tools-empty", "No tools enabled" }
+                        } else {
+                            for tool in active_tools.read().iter() {
+                                span { class: "chat-tool-chip", key: "{tool.kind.id()}",
+                                    "{tool.kind.label()}"
+                                }
+                            }
+                        }
+                    }
+                }
+
                 div { id: "chat-input-bar",
                     textarea {
                         id: "chat-input",
@@ -475,7 +509,7 @@ pub fn ChatPane(
                         }
                     }
                 }
-                p { id: "input-hint", "Shift+Enter for newline" }
+                p { id: "input-hint", "Shift+Enter for newline. Enabled tools are available to Ollama automatically." }
             }
         }
     }
