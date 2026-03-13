@@ -6,11 +6,11 @@ use std::sync::{
     Arc,
 };
 
-use crate::db;
+use crate::db::{self, WasmModel};
 use crate::markdown;
 use crate::providers::{self, Message};
 
-use super::types::{run_builtin, UiMessage, PROVIDER_OLLAMA};
+use super::types::{run_builtin, UiMessage, PROVIDER_OLLAMA, PROVIDER_WASI};
 
 #[component]
 pub fn ChatPane(
@@ -21,6 +21,7 @@ pub fn ChatPane(
     current_provider: Signal<String>,
     mut current_system_prompt: Signal<String>,
     ollama_base_url: Signal<String>,
+    wasm_models: Signal<Vec<WasmModel>>,
     mut streaming_chats: Signal<HashMap<String, Arc<AtomicBool>>>,
     on_messages_changed: EventHandler<()>,
 ) -> Element {
@@ -171,6 +172,105 @@ pub fn ChatPane(
                     streaming_chats.write().remove(&chat_id2);
                     on_messages_changed.call(());
                 });
+            } else if provider == PROVIDER_WASI {
+                // Look up the wasm bytes for the selected model ID.
+                let wasm_entry = wasm_models.read().iter().find(|m| m.id == model).cloned();
+                match wasm_entry {
+                    None => {
+                        let err = format!("WASI module '{}' not found. Upload it in Provider Settings.", model);
+                        if let Ok(asst_msg) = db::add_message(&conn.read(), &chat_id, "assistant", &err) {
+                            messages.write().push(UiMessage::from_db(&asst_msg));
+                        }
+                        on_messages_changed.call(());
+                    }
+                    Some(wasm_model) => {
+                        let mut history: Vec<Message> = Vec::new();
+                        if !system_prompt.is_empty() {
+                            history.push(Message {
+                                role: "system".to_string(),
+                                content: system_prompt,
+                            });
+                        }
+                        history.extend(
+                            messages
+                                .read()
+                                .iter()
+                                .filter(|m| !m.streaming)
+                                .map(|m| Message {
+                                    role: m.role.clone(),
+                                    content: m.content.clone(),
+                                }),
+                        );
+
+                        let stream_id = uuid::Uuid::new_v4().to_string();
+                        messages.write().push(UiMessage::new_streaming(stream_id.clone()));
+
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        streaming_chats.write().insert(chat_id.clone(), cancel.clone());
+
+                        let conn2 = conn.clone();
+                        let chat_id2 = chat_id.clone();
+                        spawn(async move {
+                            let mut rx = providers::wasi::chat_stream(
+                                wasm_model.bytes,
+                                wasm_model.name,
+                                history,
+                            );
+                            let mut full_content = String::new();
+
+                            loop {
+                                if cancel.load(Ordering::Relaxed) {
+                                    if !full_content.is_empty() {
+                                        if let Ok(saved) = db::add_message(
+                                            &conn2.read(), &chat_id2, "assistant", &full_content,
+                                        ) {
+                                            if let Some(msg) = messages.write().iter_mut().find(|m| m.id == stream_id) {
+                                                msg.id = saved.id;
+                                                msg.streaming = false;
+                                            }
+                                        }
+                                    } else {
+                                        messages.write().retain(|m| m.id != stream_id);
+                                    }
+                                    streaming_chats.write().remove(&chat_id2);
+                                    on_messages_changed.call(());
+                                    return;
+                                }
+
+                                match rx.recv().await {
+                                    Some(Ok(token)) => {
+                                        full_content.push_str(&token);
+                                        let html = markdown::render(&full_content);
+                                        if let Some(msg) = messages.write().iter_mut().find(|m| m.id == stream_id) {
+                                            msg.content = full_content.clone();
+                                            msg.html = html;
+                                        }
+                                    }
+                                    Some(Err(e)) => {
+                                        let err_html = format!("<span style='color:#e03131'>WASI Error: {e}</span>");
+                                        if let Some(msg) = messages.write().iter_mut().find(|m| m.id == stream_id) {
+                                            msg.html = err_html;
+                                            msg.streaming = false;
+                                        }
+                                        streaming_chats.write().remove(&chat_id2);
+                                        on_messages_changed.call(());
+                                        return;
+                                    }
+                                    None => break,
+                                }
+                            }
+
+                            if let Ok(saved) = db::add_message(&conn2.read(), &chat_id2, "assistant", &full_content) {
+                                if let Some(msg) = messages.write().iter_mut().find(|m| m.id == stream_id) {
+                                    msg.id = saved.id;
+                                    msg.streaming = false;
+                                }
+                            }
+                            streaming_chats.write().remove(&chat_id2);
+                            on_messages_changed.call(());
+                        });
+                    }
+                }
             } else {
                 let response_text = run_builtin(&model, &text);
                 if let Ok(asst_msg) = db::add_message(&conn.read(), &chat_id, "assistant", &response_text) {
@@ -289,9 +389,27 @@ pub fn ChatPane(
                                             class: "msg-action-btn",
                                             title: "Copy markdown",
                                             onclick: move |_| {
+                                                // navigator.clipboard requires a secure context (HTTPS)
+                                                // which is unavailable in Android WebViews. Fall back to
+                                                // the legacy execCommand approach when the Clipboard API
+                                                // is not available (e.g. on Android).
+                                                let js_text = serde_json::to_string(&raw_content).unwrap_or_default();
                                                 let _ = eval(&format!(
-                                                    "navigator.clipboard.writeText({});",
-                                                    serde_json::to_string(&raw_content).unwrap_or_default()
+                                                    r#"(function(t){{
+                                                        if(navigator.clipboard&&navigator.clipboard.writeText){{
+                                                            navigator.clipboard.writeText(t);
+                                                        }}else{{
+                                                            var el=document.createElement('textarea');
+                                                            el.value=t;
+                                                            el.style.position='fixed';
+                                                            el.style.opacity='0';
+                                                            document.body.appendChild(el);
+                                                            el.focus();el.select();
+                                                            try{{document.execCommand('copy');}}catch(e){{}}
+                                                            document.body.removeChild(el);
+                                                        }}
+                                                    }})({})"#,
+                                                    js_text
                                                 ));
                                             },
                                             svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",

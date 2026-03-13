@@ -27,6 +27,15 @@ pub struct DbMessage {
     pub created_at: String,
 }
 
+/// A stored WASM model binary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WasmModel {
+    pub id: String,
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub created_at: String,
+}
+
 fn db_path() -> PathBuf {
     let mut p = dirs_next();
     p.push("toolx_ai");
@@ -36,18 +45,72 @@ fn db_path() -> PathBuf {
 }
 
 fn dirs_next() -> PathBuf {
-    // Use the data dir or fall back to current dir
-    if let Some(d) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        let mut p = PathBuf::from(d);
-        p.push(".local/share");
-        p
-    } else {
-        PathBuf::from(".")
+    // Android: call Context.getFilesDir() via JNI to get the app's internal storage path.
+    // ndk-context and jni are transitive deps on android (pulled in by dioxus-asset-resolver).
+    #[cfg(target_os = "android")]
+    {
+        if let Some(path) = android_files_dir() {
+            return path;
+        }
+        // Last-resort fallback
+        return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     }
+    // Desktop / other Unix: ~/.local/share, Windows: %USERPROFILE%\.local\share
+    #[cfg(not(target_os = "android"))]
+    {
+        if let Some(d) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            let mut p = PathBuf::from(d);
+            p.push(".local/share");
+            p
+        } else {
+            PathBuf::from(".")
+        }
+    }
+}
+
+/// Call `android.content.Context.getFilesDir()` via JNI and return the path.
+/// Returns `None` if any JNI call fails (e.g. called before the runtime is ready).
+#[cfg(target_os = "android")]
+fn android_files_dir() -> Option<PathBuf> {
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread().ok()?;
+
+    let files_dir = env
+        .call_method(
+            unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) },
+            "getFilesDir",
+            "()Ljava/io/File;",
+            &[],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+
+    let path_str = env
+        .call_method(&files_dir, "getAbsolutePath", "()Ljava/lang/String;", &[])
+        .ok()?
+        .l()
+        .ok()?;
+
+    let jstr = jni::objects::JString::from(path_str);
+    let path: String = env.get_string(&jstr).ok()?.into();
+    Some(PathBuf::from(path))
 }
 
 pub fn open() -> Result<Connection> {
     let conn = Connection::open(db_path())?;
+    init_schema(conn)
+}
+
+/// Open an in-memory SQLite database. Used as a fallback when the on-disk path
+/// is not accessible (e.g. first launch on Android before the files dir is ready).
+pub fn open_memory() -> Result<Connection> {
+    let conn = Connection::open_in_memory()?;
+    init_schema(conn)
+}
+
+fn init_schema(conn: Connection) -> Result<Connection> {
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS chats (
@@ -69,6 +132,12 @@ pub fn open() -> Result<Connection> {
         CREATE TABLE IF NOT EXISTS settings (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS wasm_models (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            bytes      BLOB NOT NULL,
+            created_at TEXT NOT NULL
         );",
     )?;
     // Migrations for existing DBs
@@ -219,5 +288,57 @@ pub fn update_chat_system_prompt(conn: &Connection, chat_id: &str, prompt: &str)
         "UPDATE chats SET system_prompt=?1 WHERE id=?2",
         params![prompt, chat_id],
     )?;
+    Ok(())
+}
+
+// ── WASM model CRUD ───────────────────────────────────────────────────────────
+
+pub fn list_wasm_models(conn: &Connection) -> Result<Vec<WasmModel>> {
+    let mut stmt = conn
+        .prepare("SELECT id, name, bytes, created_at FROM wasm_models ORDER BY created_at ASC")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(WasmModel {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            bytes: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn add_wasm_model(conn: &Connection, name: &str, bytes: &[u8]) -> Result<WasmModel> {
+    let now = Utc::now().to_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO wasm_models (id, name, bytes, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![id, name, bytes, now],
+    )?;
+    Ok(WasmModel {
+        id,
+        name: name.to_string(),
+        bytes: bytes.to_vec(),
+        created_at: now,
+    })
+}
+
+pub fn get_wasm_model(conn: &Connection, id: &str) -> Result<Option<WasmModel>> {
+    let mut stmt =
+        conn.prepare("SELECT id, name, bytes, created_at FROM wasm_models WHERE id=?1")?;
+    let mut rows = stmt.query(params![id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(WasmModel {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            bytes: row.get(2)?,
+            created_at: row.get(3)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn delete_wasm_model(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM wasm_models WHERE id=?1", params![id])?;
     Ok(())
 }

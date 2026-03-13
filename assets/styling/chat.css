@@ -1053,3 +1053,138 @@ html, body {
     .msg-row { padding: 0 12px; }
     #chat-input-area { padding: 8px 12px 12px; }
 }
+
+/* ── Provider config tabs ───────────────────────────────────────────────── */
+#config-provider-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 0 20px 0;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.config-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 14px;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+    margin-bottom: -1px;
+}
+.config-tab:hover { color: var(--text); }
+.config-tab--active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+
+/* ── WASI module manager ────────────────────────────────────────────────── */
+.wasi-upload-area {
+    border: 1.5px dashed var(--border-light);
+    border-radius: var(--radius-sm);
+    padding: 20px;
+    text-align: center;
+    transition: border-color 0.15s, background 0.15s;
+    cursor: pointer;
+}
+.wasi-upload-area:hover {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.wasi-upload-label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+.wasi-upload-label svg { color: var(--text-dim); }
+.wasi-upload-label code {
+    font-size: 0.82rem;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--accent);
+}
+
+.wasi-module-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.wasi-module-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+
+.wasi-module-icon {
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border-radius: var(--radius-sm);
+    color: var(--accent);
+    flex-shrink: 0;
+}
+
+.wasi-module-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.wasi-module-name {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.wasi-module-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+}
+
+.wasi-badge {
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+    border-radius: 3px;
+    padding: 1px 5px;
+}
+
+.wasi-module-size {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+}
+
+.wasi-empty {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.83rem;
+    padding: 16px 0 4px;
+}

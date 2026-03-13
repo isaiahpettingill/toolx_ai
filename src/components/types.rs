@@ -5,6 +5,7 @@ use crate::markdown;
 
 pub const PROVIDER_BUILTIN: &str = "builtin";
 pub const PROVIDER_OLLAMA: &str = "ollama";
+pub const PROVIDER_WASI: &str = "wasi";
 
 // ── Built-in (local) models ───────────────────────────────────────────────────
 

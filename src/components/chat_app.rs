@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use std::collections::HashMap;
 use std::sync::{atomic::AtomicBool, Arc};
 
-use crate::db::{self, ChatSummary};
+use crate::db::{self, ChatSummary, WasmModel};
 use crate::providers;
 
 use super::chat_pane::ChatPane;
@@ -20,7 +20,14 @@ pub fn ChatApp() -> Element {
     let accent = use_signal(|| "#3b5bdb".to_string());
     use_context_provider(|| accent);
 
-    let conn = use_signal(|| db::open().expect("Failed to open SQLite database"));
+    let conn = use_signal(|| {
+        db::open().unwrap_or_else(|e| {
+            // If the on-disk DB fails (e.g. path not ready on first Android launch),
+            // fall back to an in-memory database so the app doesn't panic.
+            eprintln!("Failed to open SQLite database: {e}. Falling back to in-memory DB.");
+            db::open_memory().expect("Failed to open in-memory SQLite database")
+        })
+    });
 
     let ollama_base_url = use_signal(|| {
         db::get_setting(&conn.read(), SETTING_OLLAMA_URL)
@@ -28,6 +35,9 @@ pub fn ChatApp() -> Element {
             .flatten()
             .unwrap_or_else(|| providers::ollama::DEFAULT_BASE_URL.to_string())
     });
+
+    let wasm_models: Signal<Vec<WasmModel>> =
+        use_signal(|| db::list_wasm_models(&conn.read()).unwrap_or_default());
 
     let mut chats: Signal<Vec<ChatSummary>> =
         use_signal(|| db::list_chats(&conn.read()).unwrap_or_default());
@@ -280,6 +290,7 @@ pub fn ChatApp() -> Element {
                         current_model,
                         current_provider,
                         ollama_base_url,
+                        wasm_models,
                         chat_id: active_chat_id().clone(),
                         on_open_provider_config: move |_| provider_config_open.set(true),
                     }
@@ -293,6 +304,7 @@ pub fn ChatApp() -> Element {
                             current_provider,
                             current_system_prompt,
                             ollama_base_url,
+                            wasm_models,
                             streaming_chats,
                             on_messages_changed: move |_| {
                                 chats.set(db::list_chats(&conn.read()).unwrap_or_default());
@@ -319,6 +331,7 @@ pub fn ChatApp() -> Element {
                     ProviderConfigPanel {
                         conn,
                         ollama_base_url,
+                        wasm_models,
                         on_close: move |_| provider_config_open.set(false),
                     }
                 }

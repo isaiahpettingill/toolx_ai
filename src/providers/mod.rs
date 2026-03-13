@@ -6,6 +6,7 @@
 //! real time.
 
 pub mod ollama;
+pub mod wasi;
 
 use serde::{Deserialize, Serialize};
 
