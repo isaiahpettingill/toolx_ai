@@ -2,18 +2,17 @@
 //!
 //! Runs a `.wasm` module compiled to `wasm32-wasip1` (WASI preview 1).
 //! The conversation history is passed to the module as:
-//!   - program arguments: `["chat", "<user_message>"]`
+//!   - program arguments: `["chat"]`
+//!   - stdin: the user message, newline-terminated, then EOF
 //!   - an env var `CHAT_HISTORY` containing the JSON-encoded prior messages
 //!
 //! The module's stdout is captured and streamed back token-by-token
 //! (line-by-line) through a `tokio::sync::mpsc` channel so the UI can
 //! display streaming output in real time.
 
-use std::io::Read;
-
 use tokio::sync::mpsc;
-use wasmer::{FunctionEnv, Instance, Module, Store};
-use wasmer_wasix::{generate_import_object_from_env, Pipe, WasiEnv, WasiVersion};
+use wasmer::{Instance, Module, Store};
+use wasmer_wasix::{Pipe, WasiEnv, WasiFunctionEnv};
 
 use super::{Message, ProviderError};
 
@@ -21,8 +20,8 @@ use super::{Message, ProviderError};
 ///
 /// * `wasm_bytes` – raw `.wasm` binary (already loaded from DB).
 /// * `module_name` – human label used as the WASI program name (`argv[0]`).
-/// * `messages` – full conversation history; the last user message is passed
-///   as `argv[1]`, the rest as JSON in `CHAT_HISTORY`.
+/// * `messages` – full conversation history; the last user message is written
+///   to stdin followed by EOF, the rest is available in `CHAT_HISTORY`.
 ///
 /// Returns a channel receiver. Each `Ok(String)` is a token/chunk to append
 /// to the assistant bubble. The channel closes when the module exits.
@@ -34,7 +33,12 @@ pub fn chat_stream(
     let (tx, rx) = mpsc::channel(64);
 
     std::thread::spawn(move || {
-        let result = run_wasi(&wasm_bytes, &module_name, &messages);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create Tokio runtime");
+
+        let result = rt.block_on(run_wasi(&wasm_bytes, &module_name, &messages));
         match result {
             Ok(output) => {
                 for line in output.lines() {
@@ -51,7 +55,7 @@ pub fn chat_stream(
     rx
 }
 
-fn run_wasi(
+async fn run_wasi(
     wasm_bytes: &[u8],
     module_name: &str,
     messages: &[Message],
@@ -68,7 +72,10 @@ fn run_wasi(
         .find(|m| m.role == "user")
         .map(|m| m.content.as_str())
         .unwrap_or("");
-    let stdin_bytes = user_input.as_bytes().to_vec();
+    let mut stdin_bytes = user_input.as_bytes().to_vec();
+    if !stdin_bytes.ends_with(b"\n") {
+        stdin_bytes.push(b'\n');
+    }
     let (mut stdin_tx, stdin_rx) = Pipe::channel();
     use std::io::Write;
     stdin_tx
@@ -77,30 +84,38 @@ fn run_wasi(
     drop(stdin_tx);
 
     // ── Build args & env ──────────────────────────────────────────────────────
-    let args: Vec<String> = vec![module_name.to_string(), user_input.to_string()];
+    let args: Vec<String> = vec![module_name.to_string()];
     let history_json = serde_json::to_string(messages).unwrap_or_else(|_| "[]".to_string());
 
+    // ── Compile ───────────────────────────────────────────────────────────────
+    let mut store = Store::default();
+    let engine = store.engine().clone();
+    let module = Module::new(&store, wasm_bytes)
+        .map_err(|e| ProviderError::Parse(format!("Failed to compile wasm: {e}")))?;
+
     // ── Create WASI environment ───────────────────────────────────────────────
-    let wasi_env = WasiEnv::builder(module_name)
+    let mut wasi_env_builder = WasiEnv::builder(module_name)
         .args(&args)
         .env("CHAT_HISTORY", &history_json)
         .stdin(Box::new(stdin_rx))
         .stdout(Box::new(stdout_tx))
-        .stderr(Box::new(stderr_tx))
+        .stderr(Box::new(stderr_tx));
+    wasi_env_builder.set_engine(engine);
+    let wasi_env = wasi_env_builder
         .build()
         .map_err(|e| ProviderError::Io(format!("WASI env build error: {e}")))?;
 
-    // ── Compile ───────────────────────────────────────────────────────────────
-    let mut store = Store::default();
-    let module = Module::new(&store, wasm_bytes)
-        .map_err(|e| ProviderError::Parse(format!("Failed to compile wasm: {e}")))?;
-
     // ── Generate imports and instantiate ─────────────────────────────────────
-    let func_env = FunctionEnv::new(&mut store, wasi_env);
-    let imports = generate_import_object_from_env(&mut store, &func_env, WasiVersion::Snapshot1);
+    let mut func_env = WasiFunctionEnv::new(&mut store, wasi_env);
+    let imports = func_env
+        .import_object(&mut store, &module)
+        .map_err(|e| ProviderError::Io(format!("Failed to build WASI imports: {e}")))?;
 
     let instance = Instance::new(&mut store, &module, &imports)
         .map_err(|e| ProviderError::Io(format!("Failed to instantiate wasm: {e}")))?;
+    func_env
+        .initialize(&mut store, instance.clone())
+        .map_err(|e| ProviderError::Io(format!("Failed to initialize WASI env: {e}")))?;
 
     // ── Run the module ────────────────────────────────────────────────────────
     // Try to find and call the _start function, or fall back to a main export
@@ -116,14 +131,18 @@ fn run_wasi(
     }
 
     // ── Read captured output ─────────────────────────────────────────────────
+    drop(instance);
+    drop(func_env);
+    drop(store);
+
     let mut output = String::new();
-    stdout_rx
-        .read_to_string(&mut output)
+    tokio::io::AsyncReadExt::read_to_string(&mut stdout_rx, &mut output)
+        .await
         .map_err(|e| ProviderError::Io(format!("stdout read: {e}")))?;
 
     // Append stderr as a dimmed note if non-empty
     let mut stderr_out = String::new();
-    stderr_rx.read_to_string(&mut stderr_out).ok();
+    let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr_rx, &mut stderr_out).await;
     if !stderr_out.trim().is_empty() {
         if !output.is_empty() {
             output.push('\n');
