@@ -1,13 +1,18 @@
 use dioxus::prelude::*;
 
+use crate::db::WasiApp;
 use crate::tools::{ChatToolConfig, ChatToolKind, AVAILABLE_TOOLS};
 
 #[component]
 pub fn ToolPickerModal(
     active_tools: Vec<ChatToolConfig>,
+    wasi_apps: Signal<Vec<WasiApp>>,
     on_toggle_tool: EventHandler<ChatToolKind>,
+    on_toggle_wasi: EventHandler<String>,
     on_close: EventHandler<()>,
 ) -> Element {
+    let has_wasi = !wasi_apps.read().is_empty();
+
     rsx! {
         div {
             id: "tool-picker-backdrop",
@@ -21,7 +26,7 @@ pub fn ToolPickerModal(
                 div {
                     p { class: "tool-picker-eyebrow", "Chat tools" }
                     h2 { id: "tool-picker-title", "Add tools to this chat" }
-                    p { id: "tool-picker-subtitle", "Enable lightweight tools that can be invoked from the composer." }
+                    p { id: "tool-picker-subtitle", "Enable lightweight tools that can be invoked by the AI." }
                 }
                 button {
                     id: "tool-picker-close",
@@ -37,8 +42,13 @@ pub fn ToolPickerModal(
             }
 
             div { id: "tool-picker-body",
+                // Built-in tools
                 for tool in AVAILABLE_TOOLS.iter().copied() {
                     {
+                        // Skip showing Read/Write file tools - they're enabled automatically when WASI tools are used
+                        if tool == ChatToolKind::ReadTextFile || tool == ChatToolKind::WriteTextFile {
+                            return rsx! {};
+                        }
                         let enabled = active_tools.iter().any(|active| active.kind == tool);
                         rsx! {
                             button {
@@ -64,7 +74,7 @@ pub fn ToolPickerModal(
                                     div { class: "tool-card-desc", "{tool.description()}" }
                                     div { class: "tool-card-hint",
                                         if enabled {
-                                            "Enabled for this chat"
+                                            "Enabled"
                                         } else {
                                             "Tap to enable"
                                         }
@@ -72,6 +82,46 @@ pub fn ToolPickerModal(
                                 }
                                 div { class: if enabled { "tool-card-toggle tool-card-toggle--active" } else { "tool-card-toggle" },
                                     if enabled { "On" } else { "Off" }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // WASI Apps section
+                if has_wasi {
+                    div { class: "tool-picker-section-header", "WASI Apps" }
+                    for app in wasi_apps.read().iter() {
+                        {
+                            let app_id = app.id.clone();
+                            let enabled = active_tools.iter().any(|t| t.wasi_app_id.as_ref() == Some(&app.id));
+                            rsx! {
+                                button {
+                                    class: if enabled { "tool-card tool-card--active" } else { "tool-card" },
+                                    key: "wasi-{app.id}",
+                                    onclick: move |_| on_toggle_wasi.call(app_id.clone()),
+
+                                    div { class: "tool-card-icon",
+                                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                                            fill: "none", stroke: "currentColor", stroke_width: "2",
+                                            width: "18", height: "18",
+                                            polyline { points: "4 17 10 11 4 5" }
+                                            line { x1: "12", y1: "19", x2: "20", y2: "19" }
+                                        }
+                                    }
+                                    div { class: "tool-card-copy",
+                                        div { class: "tool-card-name", "{app.name}" }
+                                        div { class: "tool-card-desc",
+                                            if app.description.is_empty() {
+                                                "No description"
+                                            } else {
+                                                "{app.description}"
+                                            }
+                                        }
+                                    }
+                                    div { class: if enabled { "tool-card-toggle tool-card-toggle--active" } else { "tool-card-toggle" },
+                                        if enabled { "On" } else { "Off" }
+                                    }
                                 }
                             }
                         }

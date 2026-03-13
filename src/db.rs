@@ -15,6 +15,7 @@ pub struct ChatSummary {
     pub provider: String,
     pub system_prompt: String,
     pub tools_json: String,
+    pub vfs_json: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -35,6 +36,23 @@ pub struct WasmModel {
     pub name: String,
     pub bytes: Vec<u8>,
     pub created_at: String,
+}
+
+/// A stored WASI CLI application.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WasiApp {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub help_text: String,
+    pub bytes: Vec<u8>,
+    pub created_at: String,
+}
+
+/// Virtual filesystem state for a chat.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VirtualFs {
+    pub files: std::collections::HashMap<String, String>,
 }
 
 fn db_path() -> PathBuf {
@@ -121,6 +139,7 @@ fn init_schema(conn: Connection) -> Result<Connection> {
             provider      TEXT NOT NULL DEFAULT 'builtin',
             system_prompt TEXT NOT NULL DEFAULT '',
             tools_json    TEXT NOT NULL DEFAULT '[]',
+            vfs_json      TEXT NOT NULL DEFAULT '{}',
             created_at    TEXT NOT NULL,
             updated_at    TEXT NOT NULL
         );
@@ -140,15 +159,20 @@ fn init_schema(conn: Connection) -> Result<Connection> {
             name       TEXT NOT NULL,
             bytes      BLOB NOT NULL,
             created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS wasi_apps (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            description  TEXT NOT NULL DEFAULT '',
+            help_text    TEXT NOT NULL DEFAULT '',
+            bytes        BLOB NOT NULL,
+            created_at   TEXT NOT NULL
         );",
     )?;
-    // Migrations for existing DBs
-    conn.execute_batch("ALTER TABLE chats ADD COLUMN provider TEXT NOT NULL DEFAULT 'builtin';")
+
+    conn.execute_batch("ALTER TABLE chats ADD COLUMN vfs_json TEXT NOT NULL DEFAULT '{}';")
         .ok();
-    conn.execute_batch("ALTER TABLE chats ADD COLUMN system_prompt TEXT NOT NULL DEFAULT '';")
-        .ok();
-    conn.execute_batch("ALTER TABLE chats ADD COLUMN tools_json TEXT NOT NULL DEFAULT '[]';")
-        .ok();
+
     Ok(conn)
 }
 
@@ -175,7 +199,7 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
 
 pub fn list_chats(conn: &Connection) -> Result<Vec<ChatSummary>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, model, provider, system_prompt, tools_json, created_at, updated_at FROM chats ORDER BY updated_at DESC",
+        "SELECT id, title, model, provider, system_prompt, tools_json, vfs_json, created_at, updated_at FROM chats ORDER BY updated_at DESC",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(ChatSummary {
@@ -185,8 +209,9 @@ pub fn list_chats(conn: &Connection) -> Result<Vec<ChatSummary>> {
             provider: row.get(3)?,
             system_prompt: row.get(4)?,
             tools_json: row.get(5)?,
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
+            vfs_json: row.get(6)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     })?;
     rows.collect()
@@ -201,7 +226,7 @@ pub fn create_chat(
     let now = Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT INTO chats (id, title, model, provider, system_prompt, tools_json, created_at, updated_at) VALUES (?1,?2,?3,?4,'','[]',?5,?6)",
+        "INSERT INTO chats (id, title, model, provider, system_prompt, tools_json, vfs_json, created_at, updated_at) VALUES (?1,?2,?3,?4,'', '[]', '{}', ?5,?6)",
         params![id, title, model, provider, now, now],
     )?;
     Ok(ChatSummary {
@@ -211,6 +236,7 @@ pub fn create_chat(
         provider: provider.to_string(),
         system_prompt: String::new(),
         tools_json: "[]".to_string(),
+        vfs_json: "{}".to_string(),
         created_at: now.clone(),
         updated_at: now,
     })
@@ -354,5 +380,101 @@ pub fn get_wasm_model(conn: &Connection, id: &str) -> Result<Option<WasmModel>> 
 
 pub fn delete_wasm_model(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM wasm_models WHERE id=?1", params![id])?;
+    Ok(())
+}
+
+// ── WASI apps (global) ─────────────────────────────────────────────────────────
+
+pub fn list_wasi_apps(conn: &Connection) -> Result<Vec<WasiApp>> {
+    let mut stmt = conn
+        .prepare("SELECT id, name, description, help_text, bytes, created_at FROM wasi_apps ORDER BY created_at ASC")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(WasiApp {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            help_text: row.get(3)?,
+            bytes: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn add_wasi_app(
+    conn: &Connection,
+    name: &str,
+    description: &str,
+    help_text: &str,
+    bytes: &[u8],
+) -> Result<WasiApp> {
+    let now = Utc::now().to_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO wasi_apps (id, name, description, help_text, bytes, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, name, description, help_text, bytes, now],
+    )?;
+    Ok(WasiApp {
+        id,
+        name: name.to_string(),
+        description: description.to_string(),
+        help_text: help_text.to_string(),
+        bytes: bytes.to_vec(),
+        created_at: now,
+    })
+}
+
+pub fn get_wasi_app(conn: &Connection, id: &str) -> Result<Option<WasiApp>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, help_text, bytes, created_at FROM wasi_apps WHERE id=?1",
+    )?;
+    let mut rows = stmt.query(params![id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(WasiApp {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            help_text: row.get(3)?,
+            bytes: row.get(4)?,
+            created_at: row.get(5)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn update_wasi_app(conn: &Connection, id: &str, description: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE wasi_apps SET description=?1 WHERE id=?2",
+        params![description, id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_wasi_app(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM wasi_apps WHERE id=?1", params![id])?;
+    Ok(())
+}
+
+// ── Virtual filesystem per chat ─────────────────────────────────────────────────
+
+pub fn get_chat_vfs(conn: &Connection, chat_id: &str) -> Result<VirtualFs> {
+    let mut stmt = conn.prepare("SELECT vfs_json FROM chats WHERE id=?1")?;
+    let mut rows = stmt.query(params![chat_id])?;
+    if let Some(row) = rows.next()? {
+        let vfs_json: String = row.get(0)?;
+        Ok(serde_json::from_str(&vfs_json).unwrap_or_default())
+    } else {
+        Ok(VirtualFs::default())
+    }
+}
+
+pub fn update_chat_vfs(conn: &Connection, chat_id: &str, vfs: &VirtualFs) -> Result<()> {
+    let vfs_json = serde_json::to_string(vfs).unwrap_or_else(|_| "{}".to_string());
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE chats SET vfs_json=?1, updated_at=?2 WHERE id=?3",
+        params![vfs_json, now, chat_id],
+    )?;
     Ok(())
 }

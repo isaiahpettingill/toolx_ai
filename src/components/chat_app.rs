@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use std::collections::HashMap;
 use std::sync::{atomic::AtomicBool, Arc};
 
-use crate::db::{self, ChatSummary, WasmModel};
+use crate::db::{self, ChatSummary, WasiApp, WasmModel};
 use crate::providers;
 use crate::tools::{parse_tool_configs, serialize_tool_configs, ChatToolConfig, ChatToolKind};
 
@@ -40,6 +40,9 @@ pub fn ChatApp() -> Element {
 
     let wasm_models: Signal<Vec<WasmModel>> =
         use_signal(|| db::list_wasm_models(&conn.read()).unwrap_or_default());
+
+    let wasi_apps: Signal<Vec<WasiApp>> =
+        use_signal(|| db::list_wasi_apps(&conn.read()).unwrap_or_default());
 
     let mut chats: Signal<Vec<ChatSummary>> =
         use_signal(|| db::list_chats(&conn.read()).unwrap_or_default());
@@ -121,6 +124,32 @@ pub fn ChatApp() -> Element {
                 next_tools.remove(index);
             } else {
                 next_tools.push(ChatToolConfig::new(tool_kind));
+            }
+
+            let tools_json = serialize_tool_configs(&next_tools);
+            current_tools.set(next_tools);
+
+            if let Some(chat_id) = active_chat_id() {
+                db::update_chat_tools(&conn.read(), &chat_id, &tools_json).ok();
+                chats.set(db::list_chats(&conn.read()).unwrap_or_default());
+            }
+        }
+    };
+
+    let toggle_wasi = {
+        let conn = conn.clone();
+        let active_chat_id = active_chat_id.clone();
+        move |app_id: String| {
+            let mut next_tools = current_tools.read().clone();
+            if let Some(index) = next_tools
+                .iter()
+                .position(|tool| tool.wasi_app_id.as_ref() == Some(&app_id))
+            {
+                next_tools.remove(index);
+            } else {
+                let mut config = ChatToolConfig::new(ChatToolKind::DuckDuckGoSearch);
+                config.wasi_app_id = Some(app_id);
+                next_tools.push(config);
             }
 
             let tools_json = serialize_tool_configs(&next_tools);
@@ -377,7 +406,9 @@ pub fn ChatApp() -> Element {
                 if tool_picker_open() {
                     ToolPickerModal {
                         active_tools: current_tools(),
+                        wasi_apps: wasi_apps,
                         on_toggle_tool: toggle_tool,
+                        on_toggle_wasi: toggle_wasi,
                         on_close: move |_| tool_picker_open.set(false),
                     }
                 }

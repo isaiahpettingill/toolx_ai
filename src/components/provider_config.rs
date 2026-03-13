@@ -65,13 +65,27 @@ pub fn ProviderConfigPanel(
                     }
                     " WASI Modules"
                 }
+                button {
+                    class: if active_tab() == "wasi_apps" { "config-tab config-tab--active" } else { "config-tab" },
+                    onclick: move |_| active_tab.set("wasi_apps"),
+                    // terminal icon
+                    svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                        width: "14", height: "14",
+                        polyline { points: "4 17 10 11 4 5" }
+                        line { x1: "12", y1: "19", x2: "20", y2: "19" }
+                    }
+                    " WASI Apps"
+                }
             }
 
             div { id: "config-panel-body",
                 if active_tab() == "ollama" {
                     OllamaSection { conn, ollama_base_url, on_close }
-                } else {
+                } else if active_tab() == "wasi" {
                     WasiSection { conn, wasm_models }
+                } else {
+                    WasiAppsSection { conn }
                 }
             }
         }
