@@ -11,6 +11,9 @@ pub struct ChatSummary {
     pub id: String,
     pub title: String,
     pub model: String,
+    /// e.g. "builtin" | "ollama"
+    pub provider: String,
+    pub system_prompt: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -48,11 +51,13 @@ pub fn open() -> Result<Connection> {
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS chats (
-            id          TEXT PRIMARY KEY,
-            title       TEXT NOT NULL,
-            model       TEXT NOT NULL DEFAULT 'echo:0b',
-            created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL
+            id            TEXT PRIMARY KEY,
+            title         TEXT NOT NULL,
+            model         TEXT NOT NULL DEFAULT 'echo:0b',
+            provider      TEXT NOT NULL DEFAULT 'builtin',
+            system_prompt TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS messages (
             id          TEXT PRIMARY KEY,
@@ -60,38 +65,77 @@ pub fn open() -> Result<Connection> {
             role        TEXT NOT NULL,
             content     TEXT NOT NULL,
             created_at  TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );",
     )?;
+    // Migrations for existing DBs
+    conn.execute_batch("ALTER TABLE chats ADD COLUMN provider TEXT NOT NULL DEFAULT 'builtin';")
+        .ok();
+    conn.execute_batch("ALTER TABLE chats ADD COLUMN system_prompt TEXT NOT NULL DEFAULT '';")
+        .ok();
     Ok(conn)
+}
+
+/// Read a setting value by key, returning `None` if not set.
+pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
+    let mut stmt = conn.prepare("SELECT value FROM settings WHERE key=?1")?;
+    let mut rows = stmt.query(params![key])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Upsert a setting value.
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
 }
 
 pub fn list_chats(conn: &Connection) -> Result<Vec<ChatSummary>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, model, created_at, updated_at FROM chats ORDER BY updated_at DESC",
+        "SELECT id, title, model, provider, system_prompt, created_at, updated_at FROM chats ORDER BY updated_at DESC",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(ChatSummary {
             id: row.get(0)?,
             title: row.get(1)?,
             model: row.get(2)?,
-            created_at: row.get(3)?,
-            updated_at: row.get(4)?,
+            provider: row.get(3)?,
+            system_prompt: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
         })
     })?;
     rows.collect()
 }
 
-pub fn create_chat(conn: &Connection, title: &str, model: &str) -> Result<ChatSummary> {
+pub fn create_chat(
+    conn: &Connection,
+    title: &str,
+    model: &str,
+    provider: &str,
+) -> Result<ChatSummary> {
     let now = Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT INTO chats (id, title, model, created_at, updated_at) VALUES (?1,?2,?3,?4,?5)",
-        params![id, title, model, now, now],
+        "INSERT INTO chats (id, title, model, provider, system_prompt, created_at, updated_at) VALUES (?1,?2,?3,?4,'',?5,?6)",
+        params![id, title, model, provider, now, now],
     )?;
     Ok(ChatSummary {
         id,
         title: title.to_string(),
         model: model.to_string(),
+        provider: provider.to_string(),
+        system_prompt: String::new(),
         created_at: now.clone(),
         updated_at: now,
     })
@@ -158,6 +202,22 @@ pub fn update_chat_model(conn: &Connection, chat_id: &str, model: &str) -> Resul
     conn.execute(
         "UPDATE chats SET model=?1 WHERE id=?2",
         params![model, chat_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_chat_provider(conn: &Connection, chat_id: &str, provider: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE chats SET provider=?1 WHERE id=?2",
+        params![provider, chat_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_chat_system_prompt(conn: &Connection, chat_id: &str, prompt: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE chats SET system_prompt=?1 WHERE id=?2",
+        params![prompt, chat_id],
     )?;
     Ok(())
 }

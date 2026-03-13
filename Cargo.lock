@@ -5193,11 +5193,14 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dioxus",
+ "futures-util",
  "pulldown-cmark",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
  "syntect",
+ "tokio",
  "uuid",
 ]
 

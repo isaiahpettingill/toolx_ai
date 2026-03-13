@@ -590,7 +590,10 @@ html, body {
     line-height: 1.5;
     padding: 4px 0;
     min-height: 24px;
-    height: auto;
+    max-height: 200px;
+    overflow-y: auto;
+    /* Auto-grow: supported in modern Chromium (WebKit in desktop) */
+    field-sizing: content;
 }
 #chat-input::placeholder { color: var(--text-dim); }
 
@@ -647,6 +650,368 @@ html, body {
     transition: background 0.15s;
 }
 .accent-btn:hover { background: color-mix(in srgb, var(--accent) 80%, white); }
+.accent-btn--sm { padding: 5px 12px; font-size: 0.82rem; }
+
+/* ── Ghost button ───────────────────────────────────────────────────────── */
+.ghost-btn {
+    padding: 8px 18px;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    font-size: 0.88rem;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+.ghost-btn:hover { background: var(--bg-raised); color: var(--text); }
+.ghost-btn--sm { padding: 5px 12px; font-size: 0.82rem; }
+
+/* ── Provider tabs (topbar) ─────────────────────────────────────────────── */
+#provider-tabs {
+    display: flex;
+    gap: 2px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 3px;
+}
+
+.provider-tab {
+    padding: 4px 12px;
+    background: transparent;
+    border: none;
+    border-radius: calc(var(--radius-md) - 2px);
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+.provider-tab:hover { color: var(--text); }
+.provider-tab--active {
+    background: var(--bg-input);
+    color: var(--text);
+}
+
+/* ── Topbar config button ───────────────────────────────────────────────── */
+#topbar-config-btn {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    flex-shrink: 0;
+}
+#topbar-config-btn:hover { background: var(--bg-raised); color: var(--text); }
+
+/* ── Stop button ────────────────────────────────────────────────────────── */
+#chat-stop-btn {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    border: none;
+    background: #e03131;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.15s;
+}
+#chat-stop-btn:hover { background: #c92a2a; }
+
+/* ── Sidebar footer buttons ─────────────────────────────────────────────── */
+.sidebar-footer-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 7px 10px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    margin-bottom: 8px;
+}
+.sidebar-footer-btn:hover { background: var(--bg-raised); color: var(--text); }
+.sidebar-footer-btn--active {
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    color: var(--text);
+}
+
+/* ── Chat row spinner (streaming indicator) ─────────────────────────────── */
+.chat-row-spinner {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+    animation: pulse-dot 1s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.4; transform: scale(0.7); }
+}
+
+/* ── System prompt bar ──────────────────────────────────────────────────── */
+#system-prompt-bar {
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.sys-prompt-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 7px 20px;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    cursor: pointer;
+    text-align: left;
+    transition: color 0.15s;
+}
+.sys-prompt-toggle:hover { color: var(--text-muted); }
+.sys-prompt-toggle svg {
+    transition: transform 0.2s;
+    flex-shrink: 0;
+}
+.sys-prompt-toggle--open svg { transform: rotate(180deg); }
+
+#system-prompt-editor {
+    padding: 0 20px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+#system-prompt-input {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 0.88rem;
+    font-family: inherit;
+    padding: 8px 12px;
+    resize: vertical;
+    outline: none;
+    line-height: 1.5;
+    transition: border-color 0.2s;
+}
+#system-prompt-input:focus { border-color: var(--accent); }
+#system-prompt-input::placeholder { color: var(--text-dim); }
+
+#system-prompt-actions {
+    display: flex;
+    gap: 8px;
+}
+
+/* ── Provider config panel overlay ─────────────────────────────────────── */
+#config-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.55);
+    z-index: 300;
+}
+
+#config-panel {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(480px, 90vw);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 16px 48px rgba(0,0,0,0.7);
+    z-index: 301;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+#config-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+#config-panel-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text);
+}
+
+#config-panel-close {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+#config-panel-close:hover { background: var(--bg-raised); color: var(--text); }
+
+#config-panel-body {
+    padding: 20px;
+    overflow-y: auto;
+}
+
+.config-section {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.config-section-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.config-section-icon {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.config-section-name {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.config-section-desc {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-top: 1px;
+}
+
+.config-field {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.config-label {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.config-input-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.config-input {
+    flex: 1;
+    background: var(--bg-input);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 0.88rem;
+    padding: 7px 12px;
+    outline: none;
+    transition: border-color 0.2s;
+}
+.config-input:focus { border-color: var(--accent); }
+
+.config-test-btn {
+    padding: 7px 14px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s, color 0.15s;
+}
+.config-test-btn:hover:not(:disabled) { background: var(--bg-input); color: var(--text); }
+.config-test-btn:disabled { opacity: 0.5; cursor: default; }
+.config-test-btn--loading { opacity: 0.7; }
+
+.config-test-ok {
+    font-size: 0.8rem;
+    color: #0ca678;
+}
+
+.config-test-err {
+    font-size: 0.8rem;
+    color: #e03131;
+}
+
+.config-actions {
+    display: flex;
+    gap: 8px;
+    padding-top: 4px;
+}
+
+/* ── Model dropdown extras ──────────────────────────────────────────────── */
+.model-option--loading { color: var(--text-dim); font-size: 0.85rem; }
+.model-option--empty { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; }
+.model-option-hint { font-size: 0.78rem; color: var(--text-muted); }
+.model-option-config-link {
+    background: transparent;
+    border: none;
+    color: var(--accent);
+    font-size: 0.82rem;
+    cursor: pointer;
+    text-align: left;
+    padding: 0;
+    margin-top: 4px;
+}
+.model-option-config-link:hover { text-decoration: underline; }
+
+/* ── Streaming cursor blink ─────────────────────────────────────────────── */
+.streaming-cursor {
+    display: inline-block;
+    width: 8px;
+    height: 14px;
+    background: var(--accent);
+    border-radius: 1px;
+    vertical-align: text-bottom;
+    animation: blink 0.9s step-start infinite;
+}
+
+@keyframes blink {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0; }
+}
 
 /* ── Responsive: mobile drawer ──────────────────────────────────────────── */
 /*

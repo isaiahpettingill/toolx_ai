@@ -1,4 +1,9 @@
 //! The components module contains all shared components for our app.
 
-mod chat;
-pub use chat::ChatApp;
+mod types;
+mod model_selector;
+mod provider_config;
+mod chat_pane;
+mod chat_app;
+
+pub use chat_app::ChatApp;

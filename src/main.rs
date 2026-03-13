@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 mod components;
 mod db;
 mod markdown;
+mod providers;
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const MAIN_CSS: Asset = asset!("/assets/styling/main.css");
