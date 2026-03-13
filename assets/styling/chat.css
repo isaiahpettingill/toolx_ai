@@ -1444,3 +1444,93 @@ html, body {
     font-size: 0.83rem;
     padding: 16px 0 4px;
 }
+
+/* ── Thinking / reasoning tokens ───────────────────────────────────────────── */
+.msg-thinking {
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    font-style: italic;
+    margin-bottom: 6px;
+    line-height: 1.5;
+}
+
+/* ── Tool invocations ─────────────────────────────────────────────────────── */
+.msg-tool-invocations {
+    margin-top: 8px;
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+}
+
+.tool-invocation {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 10px;
+    background: rgba(0,0,0,0.2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin-bottom: 6px;
+}
+
+.tool-invocation:last-child {
+    margin-bottom: 0;
+}
+
+.tool-invocation-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    cursor: pointer;
+}
+
+.tool-invocation-header:hover {
+    background: rgba(255,255,255,0.02);
+    border-radius: 4px;
+}
+
+.tool-invocation-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.76rem;
+    font-weight: 600;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.tool-invocation-query {
+    font-size: 0.8rem;
+    color: var(--text);
+    font-family: monospace;
+    padding: 4px 8px;
+    background: var(--bg-input);
+    border-radius: 4px;
+    margin-top: 4px;
+    word-break: break-all;
+}
+
+.tool-invocation-toggle {
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+}
+.tool-invocation-toggle:hover {
+    background: var(--bg-raised);
+    color: var(--text);
+}
+.tool-invocation-toggle svg {
+    transition: transform 0.2s;
+}
+.tool-invocation-toggle--collapsed svg {
+    transform: rotate(-90deg);
+}

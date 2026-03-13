@@ -1,5 +1,6 @@
 use crate::db::DbMessage;
 use crate::markdown;
+use crate::tools::ToolInvocation;
 
 // ── Provider names ────────────────────────────────────────────────────────────
 
@@ -46,6 +47,8 @@ pub struct UiMessage {
     pub html: String,
     pub streaming: bool,
     pub tool_label: Option<String>,
+    pub thinking: Option<String>,
+    pub tool_invocations: Vec<ToolInvocation>,
 }
 
 impl UiMessage {
@@ -62,6 +65,8 @@ impl UiMessage {
             html,
             streaming: false,
             tool_label: None,
+            thinking: None,
+            tool_invocations: Vec::new(),
         }
     }
 
@@ -73,6 +78,8 @@ impl UiMessage {
             html: String::new(),
             streaming: true,
             tool_label: None,
+            thinking: None,
+            tool_invocations: Vec::new(),
         }
     }
 }

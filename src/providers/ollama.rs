@@ -6,11 +6,11 @@ use serde::Deserialize;
 use rig::client::CompletionClient;
 use rig::client::Nothing;
 use rig::completion::message::Message as RigMessage;
-use rig::completion::request::Chat;
+use rig::completion::Chat;
 use rig::providers::ollama as rig_ollama;
 
 use super::{Message, ProviderError, RemoteModel};
-use crate::tools::{self, ChatToolConfig, ChatToolKind, DuckDuckGoSearchTool};
+use crate::tools::{self, ChatToolConfig, ChatToolKind, DuckDuckGoSearchTool, ToolInvocation};
 
 /// Default Ollama base URL — can be overridden at runtime.
 pub const DEFAULT_BASE_URL: &str = "http://localhost:11434";
@@ -25,7 +25,7 @@ struct TagModel {
     name: String,
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// ── Public API ───────────────────────────────────────────────────────────────
 
 /// Fetch the list of locally available models from Ollama.
 pub async fn list_models(base_url: &str) -> Result<Vec<RemoteModel>, ProviderError> {
@@ -58,6 +58,12 @@ pub async fn list_models(base_url: &str) -> Result<Vec<RemoteModel>, ProviderErr
         .collect())
 }
 
+/// Chat result that includes tool invocations
+pub struct ChatResult {
+    pub content: String,
+    pub tool_invocations: Vec<ToolInvocation>,
+}
+
 pub async fn chat(
     base_url: String,
     model: String,
@@ -65,7 +71,7 @@ pub async fn chat(
     messages: Vec<Message>,
     prompt: String,
     active_tools: Vec<ChatToolConfig>,
-) -> Result<String, ProviderError> {
+) -> Result<ChatResult, ProviderError> {
     let client = rig_ollama::Client::builder()
         .api_key(Nothing)
         .base_url(base_url)
@@ -75,7 +81,11 @@ pub async fn chat(
     let preamble = tools::build_agent_preamble(&system_prompt, &active_tools);
     let history = messages.into_iter().map(into_rig_message).collect::<Vec<_>>();
 
-    if tools::has_tool(&active_tools, ChatToolKind::DuckDuckGoSearch) {
+    eprintln!("[DEBUG] Tools enabled: {:?}", active_tools);
+    eprintln!("[DEBUG] Preamble: {}", preamble);
+
+    let content = if tools::has_tool(&active_tools, ChatToolKind::DuckDuckGoSearch) {
+        eprintln!("[DEBUG] Adding DuckDuckGo search tool to agent");
         client
             .agent(&model)
             .preamble(&preamble)
@@ -84,7 +94,7 @@ pub async fn chat(
             .build()
             .chat(prompt, history)
             .await
-            .map_err(|e| ProviderError::Parse(e.to_string()))
+            .map_err(|e| ProviderError::Parse(e.to_string()))?
     } else {
         client
             .agent(&model)
@@ -93,8 +103,17 @@ pub async fn chat(
             .build()
             .chat(prompt, history)
             .await
-            .map_err(|e| ProviderError::Parse(e.to_string()))
-    }
+            .map_err(|e| ProviderError::Parse(e.to_string()))?
+    };
+
+    // Parse tool invocations from the response
+    let (clean_content, tool_invocations) = tools::parse_tool_invocations(&content);
+    eprintln!("[DEBUG] Parsed invocations: {:?}", tool_invocations);
+
+    Ok(ChatResult {
+        content: clean_content,
+        tool_invocations,
+    })
 }
 
 fn into_rig_message(message: Message) -> RigMessage {

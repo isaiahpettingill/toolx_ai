@@ -40,7 +40,9 @@ pub fn ChatPane(
     });
 
     let msg_count = messages.read().len();
+    let current_chat_id = chat_id.clone();
     use_effect(move || {
+        let _ = current_chat_id;
         let _ = msg_count;
         let _ = eval(
             "var a=document.getElementById('scroll-anchor');if(a)a.scrollIntoView({behavior:'smooth'});",
@@ -129,17 +131,19 @@ pub fn ChatPane(
                     )
                     .await
                     {
-                        Ok(full_content) => {
+                        Ok(result) => {
+                            eprintln!("[DEBUG] Raw response: {}", result.content);
                             if let Ok(saved) =
-                                db::add_message(&conn2.read(), &chat_id2, "assistant", &full_content)
+                                db::add_message(&conn2.read(), &chat_id2, "assistant", &result.content)
                             {
                                 if let Some(msg) =
                                     messages.write().iter_mut().find(|m| m.id == stream_id)
                                 {
                                     msg.id = saved.id;
-                                    msg.content = full_content.clone();
-                                    msg.html = markdown::render(&full_content);
+                                    msg.content = result.content.clone();
+                                    msg.html = markdown::render(&result.content);
                                     msg.streaming = false;
+                                    msg.tool_invocations = result.tool_invocations;
                                 }
                             }
                         }
@@ -377,10 +381,17 @@ pub fn ChatPane(
                         let raw_content = msg.content.clone();
                         let msg_id = msg.id.clone();
                         let streaming = msg.streaming;
+                        let tool_invocations = msg.tool_invocations.clone();
+                        let thinking = msg.thinking.clone();
                         rsx! {
                             div {
                                 class: if is_user { "msg-row msg-row--user" } else { "msg-row msg-row--assistant" },
                                 key: "{msg_id}",
+                                if !is_user && thinking.is_some() {
+                                    div { class: "msg-thinking",
+                                        "{thinking.as_ref().unwrap()}"
+                                    }
+                                }
                                 div {
                                     class: if is_user {
                                         "msg-bubble msg-bubble--user"
@@ -394,6 +405,26 @@ pub fn ChatPane(
                                     } else {
                                         html_content
                                     },
+                                }
+                                if !is_user && !tool_invocations.is_empty() {
+                                    div { class: "msg-tool-invocations",
+                                        for (idx, invocation) in tool_invocations.iter().enumerate() {
+                                            div { class: "tool-invocation", key: "tool-{idx}",
+                                                div { class: "tool-invocation-name",
+                                                    svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                                                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                                                        width: "12", height: "12",
+                                                        circle { cx: "11", cy: "11", r: "8" }
+                                                        path { d: "m21 21-4.35-4.35" }
+                                                    }
+                                                    "{invocation.tool_name}"
+                                                }
+                                                div { class: "tool-invocation-query",
+                                                    "{invocation.query}"
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 if !is_user && !streaming {
                                     div { class: "msg-actions",

@@ -81,8 +81,7 @@ pub fn ToolPickerModal(
 
             div { id: "tool-picker-footer",
                 div { class: "tool-picker-command-tip",
-                    code { "/ddg your query" }
-                    span { " runs a DuckDuckGo search inside the chat." }
+                    span { "Tools are automatically invoked by the model when needed." }
                 }
                 button {
                     class: "accent-btn",

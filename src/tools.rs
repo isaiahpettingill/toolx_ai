@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ToolInvocation {
+    pub tool_name: String,
+    pub query: String,
+    pub collapsed: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChatToolKind {
     DuckDuckGoSearch,
@@ -72,7 +79,7 @@ pub fn build_agent_preamble(system_prompt: &str, active_tools: &[ChatToolConfig]
 
     if has_tool(active_tools, ChatToolKind::DuckDuckGoSearch) {
         format!(
-            "{base}\n\nWhen the user needs fresh web information, local recommendations, live availability, recent events, or facts you are not confident about, call the DuckDuckGo Search tool. Never pretend you searched if you did not use the tool."
+            "{base}\n\nWhen the user needs fresh web information, local recommendations, live availability, recent events, or facts you are not confident about, call the DuckDuckGo Search tool. Never pretend you searched if you did not use the tool.\n\nAt the end of your response, if you used any tools, briefly list what searches you performed in the format: [Searches: query1, query2, ...]",
         )
     } else {
         base
@@ -165,4 +172,60 @@ fn format_duckduckgo_results(query: &str, results: &[LiteSearchResult]) -> Strin
     }
 
     lines.join("\n")
+}
+
+pub fn parse_tool_invocations(response: &str) -> (String, Vec<ToolInvocation>) {
+    let search_patterns = [
+        "[Searches:",
+        "[Search:",
+        "Searches:",
+        "Search:",
+    ];
+    
+    for search_pattern in &search_patterns {
+        if let Some(start_idx) = response.to_lowercase().find(&search_pattern.to_lowercase()) {
+            let before_searches = response[..start_idx].trim();
+            
+            let rest = &response[start_idx..];
+            if let Some(end_bracket) = rest.find(']') {
+                let searches_part = &rest[search_pattern.len()..end_bracket];
+                
+                let queries: Vec<ToolInvocation> = searches_part
+                    .split(',')
+                    .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                    .filter(|s| !s.is_empty())
+                    .map(|query| ToolInvocation {
+                        tool_name: "DuckDuckGo Search".to_string(),
+                        query,
+                        collapsed: false,
+                    })
+                    .collect();
+                
+                if !queries.is_empty() {
+                    return (before_searches.to_string(), queries);
+                }
+            } else {
+                let queries: Vec<ToolInvocation> = search_patterns
+                    .iter()
+                    .flat_map(|p| rest.split(p))
+                    .skip(1)
+                    .next()
+                    .map(|s| s.trim().split(',').map(|q| q.trim().trim_matches('"').trim_matches('\'').to_string()).filter(|q| !q.is_empty()).collect::<Vec<_>>())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|query| ToolInvocation {
+                        tool_name: "DuckDuckGo Search".to_string(),
+                        query,
+                        collapsed: false,
+                    })
+                    .collect();
+                
+                if !queries.is_empty() {
+                    return (before_searches.to_string(), queries);
+                }
+            }
+        }
+    }
+    
+    (response.to_string(), Vec::new())
 }
