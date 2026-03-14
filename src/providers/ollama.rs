@@ -4,7 +4,6 @@ use reqwest::Client;
 use serde::Deserialize;
 
 use futures_util::StreamExt;
-use tokio::sync::mpsc;
 use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
 use rig::client::Nothing;
@@ -13,10 +12,14 @@ use rig::completion::Chat;
 use rig::providers::ollama as rig_ollama;
 use rig::streaming::{StreamedAssistantContent, StreamingChat};
 use rig::tool::ToolDyn;
+use tokio::sync::mpsc;
 
-use super::{Message, ProviderError, RemoteModel};
-use crate::db::WasiApp;
-use crate::tools::{self, ChatToolConfig, ChatToolKind, DuckDuckGoSearchTool, ReadTextFileTool, ToolInvocation, VfsHandle, WriteTextFileTool, WasiAppTool};
+use super::{ChatAttachment, ChatKnowledgeBaseRef, Message, ProviderError, RemoteModel};
+use crate::db::{self, WasiApp};
+use crate::tools::{
+    self, ChatToolConfig, ChatToolKind, DuckDuckGoSearchTool, ReadTextFileTool, ToolInvocation,
+    VfsHandle, WasiAppTool, WriteTextFileTool,
+};
 
 /// Default Ollama base URL — can be overridden at runtime.
 pub const DEFAULT_BASE_URL: &str = "http://localhost:11434";
@@ -79,6 +82,9 @@ pub fn chat_stream(
     active_tools: Vec<ChatToolConfig>,
     wasi_apps: Vec<WasiApp>,
     vfs: VfsHandle,
+    attachments: Vec<ChatAttachment>,
+    knowledge_bases: Vec<ChatKnowledgeBaseRef>,
+    retrieved_context: String,
 ) -> mpsc::Receiver<Result<StreamChunk, ProviderError>> {
     let (tx, rx) = mpsc::channel(64);
 
@@ -92,6 +98,9 @@ pub fn chat_stream(
             active_tools,
             wasi_apps,
             vfs,
+            attachments,
+            knowledge_bases,
+            retrieved_context,
             tx.clone(),
         )
         .await;
@@ -120,6 +129,9 @@ pub async fn chat(
     active_tools: Vec<ChatToolConfig>,
     wasi_apps: Vec<WasiApp>,
     vfs: VfsHandle,
+    attachments: Vec<ChatAttachment>,
+    knowledge_bases: Vec<ChatKnowledgeBaseRef>,
+    retrieved_context: String,
 ) -> Result<ChatResult, ProviderError> {
     let client = rig_ollama::Client::builder()
         .api_key(Nothing)
@@ -127,8 +139,25 @@ pub async fn chat(
         .build()
         .map_err(|e| ProviderError::Http(e.to_string()))?;
 
-    let preamble = tools::build_agent_preamble(&system_prompt, &model, &active_tools, &wasi_apps);
-    let history = messages.into_iter().map(into_rig_message).collect::<Vec<_>>();
+    let preamble = tools::build_agent_preamble(
+        &system_prompt,
+        &model,
+        &active_tools,
+        &wasi_apps,
+        &attachments,
+        &knowledge_bases,
+        &retrieved_context,
+    );
+    let history = messages
+        .into_iter()
+        .map(into_rig_message)
+        .collect::<Vec<_>>();
+    let vfs_root = {
+        let guard = vfs
+            .lock()
+            .map_err(|err| ProviderError::Io(err.to_string()))?;
+        db::chat_vfs_root(&guard.chat_id)
+    };
 
     eprintln!("[DEBUG] Tools enabled: {:?}", active_tools);
     eprintln!("[DEBUG] WASI apps: {:?}", wasi_apps.len());
@@ -164,12 +193,16 @@ pub async fn chat(
                 &app.name,
                 &app.description,
                 &app.help_text,
-                app.bytes.clone(),
-                vfs.clone(),
+                app.file_path.clone(),
+                vfs_root.clone(),
             )) as Box<dyn ToolDyn>
         }));
 
-        let max_turns = if has_ddg || !wasi_app_ids.is_empty() { 6 } else { 4 };
+        let max_turns = if has_ddg || !wasi_app_ids.is_empty() {
+            6
+        } else {
+            4
+        };
 
         client
             .agent(&model)
@@ -189,7 +222,10 @@ pub async fn chat(
             .tool(WriteTextFileTool::new(vfs.clone()))
             .default_max_turns(4)
             .build();
-        agent.chat(prompt, history).await.map_err(|e| ProviderError::Parse(e.to_string()))?
+        agent
+            .chat(prompt, history)
+            .await
+            .map_err(|e| ProviderError::Parse(e.to_string()))?
     } else if has_ddg {
         let agent = client
             .agent(&model)
@@ -197,7 +233,10 @@ pub async fn chat(
             .tool(DuckDuckGoSearchTool)
             .default_max_turns(4)
             .build();
-        agent.chat(prompt, history).await.map_err(|e| ProviderError::Parse(e.to_string()))?
+        agent
+            .chat(prompt, history)
+            .await
+            .map_err(|e| ProviderError::Parse(e.to_string()))?
     } else if has_wasi {
         let agent = client
             .agent(&model)
@@ -206,7 +245,10 @@ pub async fn chat(
             .tool(WriteTextFileTool::new(vfs.clone()))
             .default_max_turns(4)
             .build();
-        agent.chat(prompt, history).await.map_err(|e| ProviderError::Parse(e.to_string()))?
+        agent
+            .chat(prompt, history)
+            .await
+            .map_err(|e| ProviderError::Parse(e.to_string()))?
     } else {
         client
             .agent(&model)
@@ -237,6 +279,9 @@ async fn run_chat_stream(
     active_tools: Vec<ChatToolConfig>,
     wasi_apps: Vec<WasiApp>,
     vfs: VfsHandle,
+    attachments: Vec<ChatAttachment>,
+    knowledge_bases: Vec<ChatKnowledgeBaseRef>,
+    retrieved_context: String,
     tx: mpsc::Sender<Result<StreamChunk, ProviderError>>,
 ) -> Result<(), ProviderError> {
     let client = rig_ollama::Client::builder()
@@ -245,8 +290,25 @@ async fn run_chat_stream(
         .build()
         .map_err(|e| ProviderError::Http(e.to_string()))?;
 
-    let preamble = tools::build_agent_preamble(&system_prompt, &model, &active_tools, &wasi_apps);
-    let history = messages.into_iter().map(into_rig_message).collect::<Vec<_>>();
+    let preamble = tools::build_agent_preamble(
+        &system_prompt,
+        &model,
+        &active_tools,
+        &wasi_apps,
+        &attachments,
+        &knowledge_bases,
+        &retrieved_context,
+    );
+    let history = messages
+        .into_iter()
+        .map(into_rig_message)
+        .collect::<Vec<_>>();
+    let vfs_root = {
+        let guard = vfs
+            .lock()
+            .map_err(|err| ProviderError::Io(err.to_string()))?;
+        db::chat_vfs_root(&guard.chat_id)
+    };
 
     eprintln!("[DEBUG] Tools enabled: {:?}", active_tools);
     eprintln!("[DEBUG] WASI apps: {:?}", wasi_apps.len());
@@ -276,13 +338,19 @@ async fn run_chat_stream(
                     &app.name,
                     &app.description,
                     &app.help_text,
-                    app.bytes.clone(),
-                    vfs.clone(),
+                    app.file_path.clone(),
+                    vfs_root.clone(),
                 )) as Box<dyn ToolDyn>
             }),
     );
 
-    let max_turns = if !wasi_app_ids.is_empty() || has_ddg { 6 } else if has_wasi { 4 } else { 2 };
+    let max_turns = if !wasi_app_ids.is_empty() || has_ddg {
+        6
+    } else if has_wasi {
+        4
+    } else {
+        2
+    };
 
     let mut stream = client
         .agent(&model)

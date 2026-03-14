@@ -1,7 +1,8 @@
 use dioxus::prelude::*;
 
-use crate::db::{self, WasiApp, WasmModel};
+use crate::db::{self, KnowledgeBase, WasiApp, WasmModel};
 use crate::providers;
+use crate::rag;
 use crate::tools;
 
 const SETTING_OLLAMA_URL: &str = "ollama_base_url";
@@ -14,6 +15,7 @@ pub fn ProviderConfigPanel(
     mut ollama_base_url: Signal<String>,
     mut wasm_models: Signal<Vec<WasmModel>>,
     mut wasi_apps: Signal<Vec<WasiApp>>,
+    mut knowledge_bases: Signal<Vec<KnowledgeBase>>,
     on_close: EventHandler<()>,
 ) -> Element {
     let mut active_tab: Signal<&'static str> = use_signal(|| "ollama");
@@ -68,6 +70,17 @@ pub fn ProviderConfigPanel(
                     " WASI Modules"
                 }
                 button {
+                    class: if active_tab() == "knowledge" { "config-tab config-tab--active" } else { "config-tab" },
+                    onclick: move |_| active_tab.set("knowledge"),
+                    svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                        width: "14", height: "14",
+                        path { d: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20" }
+                        path { d: "M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" }
+                    }
+                    " Knowledge"
+                }
+                button {
                     class: if active_tab() == "wasi_apps" { "config-tab config-tab--active" } else { "config-tab" },
                     onclick: move |_| active_tab.set("wasi_apps"),
                     // terminal icon
@@ -84,10 +97,214 @@ pub fn ProviderConfigPanel(
             div { id: "config-panel-body",
                 if active_tab() == "ollama" {
                     OllamaSection { conn, ollama_base_url, on_close }
+                } else if active_tab() == "knowledge" {
+                    KnowledgeBasesSection { conn, ollama_base_url, knowledge_bases }
                 } else if active_tab() == "wasi_apps" {
                     WasiAppsSection { conn, wasi_apps }
                 } else {
                     WasiSection { conn, wasm_models }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn KnowledgeBasesSection(
+    conn: Signal<rusqlite::Connection>,
+    ollama_base_url: Signal<String>,
+    mut knowledge_bases: Signal<Vec<KnowledgeBase>>,
+) -> Element {
+    let mut name = use_signal(String::new);
+    let mut description = use_signal(String::new);
+    let available_models = rag::default_embedding_models();
+    let mut embedding_model = use_signal(|| available_models.first().cloned().unwrap_or_default());
+    let mut upload_error = use_signal(|| Option::<String>::None);
+    let mut uploading_kb: Signal<Option<String>> = use_signal(|| None);
+
+    rsx! {
+        div { class: "config-section",
+            div { class: "config-section-header",
+                div { class: "config-section-icon",
+                    svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                        width: "16", height: "16",
+                        path { d: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20" }
+                        path { d: "M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" }
+                    }
+                }
+                div {
+                    div { class: "config-section-name", "Knowledge Bases" }
+                    div { class: "config-section-desc", "Create reusable document collections and attach them to chats." }
+                }
+            }
+
+            div { class: "config-field",
+                label { class: "config-label", "Name" }
+                input { class: "config-input", value: "{name}", oninput: move |e| name.set(e.value()) }
+            }
+            div { class: "config-field",
+                label { class: "config-label", "Description" }
+                textarea {
+                    class: "config-input",
+                    rows: "3",
+                    value: "{description}",
+                    oninput: move |e| description.set(e.value()),
+                }
+            }
+            div { class: "config-field",
+                label { class: "config-label", "Embeddings Model" }
+                select {
+                    class: "config-input",
+                    value: "{embedding_model}",
+                    onchange: move |e| embedding_model.set(e.value()),
+                    for model in available_models.iter() {
+                        option { value: "{model}", "{model}" }
+                    }
+                }
+            }
+            div { class: "config-actions",
+                button {
+                    class: "accent-btn",
+                    disabled: name.read().trim().is_empty(),
+                    onclick: move |_| {
+                        let name_value = name.read().trim().to_string();
+                        let description_value = description.read().clone();
+                        let embedding_model_value = embedding_model.read().clone();
+                        if name_value.is_empty() {
+                            return;
+                        }
+                        match db::create_knowledge_base(
+                            &conn.read(),
+                            &name_value,
+                            &description_value,
+                            &embedding_model_value,
+                        ) {
+                            Ok(kb) => {
+                                knowledge_bases.write().insert(0, kb);
+                                name.set(String::new());
+                                description.set(String::new());
+                            }
+                            Err(err) => upload_error.set(Some(format!("Failed to create knowledge base: {err}"))),
+                        }
+                    },
+                    "Create knowledge base"
+                }
+            }
+
+            if let Some(err) = upload_error() {
+                div { class: "config-test-err", "{err}" }
+            }
+
+            if knowledge_bases.read().is_empty() {
+                div { class: "wasi-empty", "No knowledge bases yet." }
+            } else {
+                div { class: "wasi-module-list",
+                    for kb in knowledge_bases.read().clone().into_iter() {
+                        {
+                            let kb_id = kb.id.clone();
+                            let kb_id_delete = kb.id.clone();
+                            let kb_name = kb.name.clone();
+                            let file_input_id = format!("kb-upload-{}", kb.id);
+                            rsx! {
+                                div { class: "wasi-module-row", key: "{kb_id}",
+                                    div { class: "wasi-module-icon",
+                                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                                            fill: "none", stroke: "currentColor", stroke_width: "2",
+                                            width: "16", height: "16",
+                                            path { d: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20" }
+                                            path { d: "M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" }
+                                        }
+                                    }
+                                    div { class: "wasi-module-info",
+                                        div { class: "wasi-module-name", "{kb.name}" }
+                                        div { class: "wasi-module-meta",
+                                            span { class: "wasi-badge", "KB" }
+                                            span { class: "wasi-module-size", "{kb.embedding_model}" }
+                                        }
+                                        if !kb.description.is_empty() {
+                                            div { class: "wasi-module-desc", "{kb.description}" }
+                                        }
+                                        div { class: "tool-card-hint", "Upload text files to build the RAG index." }
+                                    }
+                                    label {
+                                        class: "ghost-btn ghost-btn--sm",
+                                        r#for: "{file_input_id}",
+                                        if uploading_kb.read().as_deref() == Some(&kb_id) { "Uploading…" } else { "Add file" }
+                                    }
+                                    input {
+                                        id: "{file_input_id}",
+                                        r#type: "file",
+                                        style: "display:none",
+                                        onchange: move |e| {
+                                            let files = e.files();
+                                            let conn = conn.clone();
+                                            let kb_id_inner = kb_id.clone();
+                                            let kb_name_inner = kb_name.clone();
+                                            let kb_embedding_model = kb.embedding_model.clone();
+                                            let base_url = ollama_base_url.read().clone();
+                                            uploading_kb.set(Some(kb_id_inner.clone()));
+                                            upload_error.set(None);
+                                            spawn(async move {
+                                                for file in files {
+                                                    let file_name = file.name();
+                                                    match file.read_bytes().await {
+                                                        Ok(bytes) => {
+                                                            let mime = file.content_type().unwrap_or_default();
+                                                            let is_text = rag::extract_text(&bytes, &mime).is_some();
+                                                            match db::add_knowledge_base_file(
+                                                                &conn.read(),
+                                                                &kb_id_inner,
+                                                                &rag::normalize_upload_path(&file_name),
+                                                                &file_name,
+                                                                &mime,
+                                                                &bytes,
+                                                                is_text,
+                                                            ) {
+                                                                Ok(file_record) => {
+                                                                    if is_text {
+                                                                        if let Err(err) = rag::index_knowledge_base_file(
+                                                                            &conn.read(),
+                                                                            &base_url,
+                                                                            &kb_embedding_model,
+                                                                            &file_record,
+                                                                        ).await {
+                                                                            upload_error.set(Some(format!("Failed to index {}: {}", kb_name_inner, err)));
+                                                                        }
+                                                                    }
+                                                                }
+                                                                Err(err) => upload_error.set(Some(format!("Upload failed: {err}"))),
+                                                            }
+                                                        }
+                                                        Err(err) => upload_error.set(Some(format!("Failed to read file: {err}"))),
+                                                    }
+                                                }
+                                                knowledge_bases.set(db::list_knowledge_bases(&conn.read()).unwrap_or_default());
+                                                uploading_kb.set(None);
+                                            });
+                                        },
+                                    }
+                                    button {
+                                        class: "icon-btn icon-btn--danger",
+                                        title: "Delete knowledge base",
+                                        onclick: move |_| {
+                                            db::delete_knowledge_base(&conn.read(), &kb_id_delete).ok();
+                                            knowledge_bases.write().retain(|item| item.id != kb_id_delete);
+                                        },
+                                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                                            fill: "none", stroke: "currentColor", stroke_width: "2",
+                                            width: "13", height: "13",
+                                            polyline { points: "3 6 5 6 21 6" }
+                                            path { d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" }
+                                            path { d: "M10 11v6" }
+                                            path { d: "M14 11v6" }
+                                            path { d: "M9 6V4h6v2" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -288,7 +505,7 @@ fn WasiSection(
                         {
                             let model_id = model.id.clone();
                             let model_name = model.name.clone();
-                            let size_kb = model.bytes.len() / 1024;
+                            let size_kb = model.file_size / 1024;
                             rsx! {
                                 div { class: "wasi-module-row", key: "{model_id}",
                                     div { class: "wasi-module-icon",
@@ -444,7 +661,7 @@ fn WasiAppsSection(
                             let app_id_for_delete = app.id.clone();
                             let app_name = app.name.clone();
                             let app_desc = app.description.clone();
-                            let size_kb = app.bytes.len() / 1024;
+                            let size_kb = app.file_size / 1024;
                             let is_editing = editing_id.read().as_deref() == Some(&app_id);
                             rsx! {
                                 div { class: "wasi-module-row", key: "wasi-app-{idx}-{app_id}",

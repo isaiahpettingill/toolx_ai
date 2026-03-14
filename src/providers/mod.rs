@@ -17,6 +17,20 @@ pub struct Message {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatAttachment {
+    pub name: String,
+    pub path: String,
+    pub inline_context: String,
+    pub is_text: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatKnowledgeBaseRef {
+    pub name: String,
+    pub description: String,
+}
+
 /// Errors returned by a provider.
 #[derive(Debug, Clone)]
 pub enum ProviderError {

@@ -2,8 +2,9 @@ use dioxus::prelude::*;
 use std::collections::HashMap;
 use std::sync::{atomic::AtomicBool, Arc};
 
-use crate::db::{self, ChatSummary, WasiApp, WasmModel};
+use crate::db::{self, ChatSummary, KnowledgeBase, WasiApp, WasmModel};
 use crate::providers;
+use crate::rag;
 use crate::tools::{parse_tool_configs, serialize_tool_configs, ChatToolConfig, ChatToolKind};
 
 use super::chat_pane::ChatPane;
@@ -44,6 +45,9 @@ pub fn ChatApp() -> Element {
     let wasi_apps: Signal<Vec<WasiApp>> =
         use_signal(|| db::list_wasi_apps(&conn.read()).unwrap_or_default());
 
+    let knowledge_bases: Signal<Vec<KnowledgeBase>> =
+        use_signal(|| db::list_knowledge_bases(&conn.read()).unwrap_or_default());
+
     let mut chats: Signal<Vec<ChatSummary>> =
         use_signal(|| db::list_chats(&conn.read()).unwrap_or_default());
 
@@ -60,6 +64,13 @@ pub fn ChatApp() -> Element {
     let mut current_provider = use_signal(|| PROVIDER_BUILTIN.to_string());
     let mut current_system_prompt = use_signal(String::new);
     let mut current_tools: Signal<Vec<ChatToolConfig>> = use_signal(Vec::new);
+    let mut current_embedding_model = use_signal(|| {
+        rag::default_embedding_models()
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    });
+    let mut chat_knowledge_bases: Signal<Vec<KnowledgeBase>> = use_signal(Vec::new);
 
     // Per-chat streaming cancel tokens. Presence = that chat is actively streaming.
     let streaming_chats: Signal<HashMap<String, Arc<AtomicBool>>> = use_signal(HashMap::new);
@@ -87,11 +98,26 @@ pub fn ChatApp() -> Element {
                 current_provider.set(chat.provider.clone());
                 current_system_prompt.set(chat.system_prompt.clone());
                 current_tools.set(parse_tool_configs(&chat.tools_json));
+                let embedding_model = if chat.embedding_model.trim().is_empty() {
+                    rag::default_embedding_models()
+                        .into_iter()
+                        .next()
+                        .unwrap_or_default()
+                } else {
+                    chat.embedding_model.clone()
+                };
+                current_embedding_model.set(embedding_model.clone());
+                if chat.embedding_model.trim().is_empty() {
+                    db::update_chat_embedding_model(&conn_r, &id, &embedding_model).ok();
+                }
+                chat_knowledge_bases
+                    .set(db::list_chat_knowledge_bases(&conn_r, &id).unwrap_or_default());
             }
         } else {
             messages.set(Vec::new());
             current_system_prompt.set(String::new());
             current_tools.set(Vec::new());
+            chat_knowledge_bases.set(Vec::new());
         }
     });
 
@@ -104,10 +130,18 @@ pub fn ChatApp() -> Element {
                 Ok(chat) => {
                     let id = chat.id.clone();
                     chats.write().insert(0, chat);
-                    active_chat_id.set(Some(id));
+                    active_chat_id.set(Some(id.clone()));
                     messages.set(Vec::new());
                     current_system_prompt.set(String::new());
                     current_tools.set(Vec::new());
+                    let default_embedding_model = rag::default_embedding_models()
+                        .into_iter()
+                        .next()
+                        .unwrap_or_default();
+                    current_embedding_model.set(default_embedding_model.clone());
+                    db::update_chat_embedding_model(&conn.read(), &id, &default_embedding_model)
+                        .ok();
+                    chat_knowledge_bases.set(Vec::new());
                     drawer_open.set(false);
                 }
                 Err(e) => eprintln!("Failed to create chat: {e}"),
@@ -156,6 +190,26 @@ pub fn ChatApp() -> Element {
             if let Some(chat_id) = active_chat_id() {
                 db::update_chat_tools(&conn.read(), &chat_id, &tools_json).ok();
                 chats.set(db::list_chats(&conn.read()).unwrap_or_default());
+            }
+        }
+    };
+
+    let toggle_knowledge_base = {
+        let conn = conn.clone();
+        let active_chat_id = active_chat_id.clone();
+        move |knowledge_base_id: String| {
+            if let Some(chat_id) = active_chat_id() {
+                let attached_ids =
+                    db::list_chat_knowledge_base_ids(&conn.read(), &chat_id).unwrap_or_default();
+                if attached_ids.iter().any(|id| id == &knowledge_base_id) {
+                    db::detach_knowledge_base_from_chat(&conn.read(), &chat_id, &knowledge_base_id)
+                        .ok();
+                } else {
+                    db::attach_knowledge_base_to_chat(&conn.read(), &chat_id, &knowledge_base_id)
+                        .ok();
+                }
+                chat_knowledge_bases
+                    .set(db::list_chat_knowledge_bases(&conn.read(), &chat_id).unwrap_or_default());
             }
         }
     };
@@ -233,6 +287,15 @@ pub fn ChatApp() -> Element {
                                                 current_provider.set(c.provider.clone());
                                                 current_system_prompt.set(c.system_prompt.clone());
                                                 current_tools.set(parse_tool_configs(&c.tools_json));
+                                                let embedding_model = if c.embedding_model.trim().is_empty() {
+                                                    rag::default_embedding_models().into_iter().next().unwrap_or_default()
+                                                } else {
+                                                    c.embedding_model.clone()
+                                                };
+                                                current_embedding_model.set(embedding_model);
+                                                chat_knowledge_bases.set(
+                                                    db::list_chat_knowledge_bases(&conn_r, &chat_id).unwrap_or_default(),
+                                                );
                                             }
                                             active_chat_id.set(Some(chat_id.clone()));
                                             drawer_open.set(false);
@@ -300,11 +363,12 @@ pub fn ChatApp() -> Element {
                                                                      current_tools.set(parse_tool_configs(&chat.tools_json));
                                                                  }
                                                              } else {
-                                                                 messages.set(Vec::new());
-                                                                 current_tools.set(Vec::new());
-                                                             }
-                                                         }
-                                                     },
+                                                                  messages.set(Vec::new());
+                                                                  current_tools.set(Vec::new());
+                                                                  chat_knowledge_bases.set(Vec::new());
+                                                              }
+                                                          }
+                                                      },
                                                     svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
                                                         fill: "none", stroke: "currentColor", stroke_width: "2",
                                                         width: "13", height: "13",
@@ -366,14 +430,22 @@ pub fn ChatApp() -> Element {
                             current_model,
                             current_provider,
                             current_system_prompt,
+                            current_embedding_model,
                             active_tools: current_tools,
                             ollama_base_url,
                             wasm_models,
                             wasi_apps,
+                            chat_knowledge_bases,
                             streaming_chats,
                             on_open_tool_picker: move |_| tool_picker_open.set(true),
                             on_messages_changed: move |_| {
                                 chats.set(db::list_chats(&conn.read()).unwrap_or_default());
+                                if let Some(active_chat_id) = active_chat_id() {
+                                    chat_knowledge_bases.set(
+                                        db::list_chat_knowledge_bases(&conn.read(), &active_chat_id)
+                                            .unwrap_or_default(),
+                                    );
+                                }
                             },
                         }
                     } else {
@@ -399,6 +471,7 @@ pub fn ChatApp() -> Element {
                         ollama_base_url,
                         wasm_models,
                         wasi_apps,
+                        knowledge_bases,
                         on_close: move |_| provider_config_open.set(false),
                     }
                 }
@@ -407,8 +480,11 @@ pub fn ChatApp() -> Element {
                     ToolPickerModal {
                         active_tools: current_tools,
                         wasi_apps: wasi_apps,
+                        knowledge_bases,
+                        attached_knowledge_bases: chat_knowledge_bases,
                         on_toggle_tool: toggle_tool,
                         on_toggle_wasi: toggle_wasi,
+                        on_toggle_knowledge_base: toggle_knowledge_base,
                         on_close: move |_| tool_picker_open.set(false),
                     }
                 }

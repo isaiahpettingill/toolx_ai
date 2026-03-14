@@ -15,6 +15,7 @@ use wasmer::{Instance, Module, Store};
 use wasmer_wasix::{Pipe, WasiEnv, WasiFunctionEnv};
 
 use super::{Message, ProviderError};
+use crate::db;
 
 /// Run a WASM/WASI module and stream its stdout back as chunks.
 ///
@@ -26,9 +27,10 @@ use super::{Message, ProviderError};
 /// Returns a channel receiver. Each `Ok(String)` is a token/chunk to append
 /// to the assistant bubble. The channel closes when the module exits.
 pub fn chat_stream(
-    wasm_bytes: Vec<u8>,
+    module_path: String,
     module_name: String,
     messages: Vec<Message>,
+    workspace_root: std::path::PathBuf,
 ) -> mpsc::Receiver<Result<String, ProviderError>> {
     let (tx, rx) = mpsc::channel(64);
 
@@ -38,7 +40,12 @@ pub fn chat_stream(
             .build()
             .expect("Failed to create Tokio runtime");
 
-        let result = rt.block_on(run_wasi(&wasm_bytes, &module_name, &messages));
+        let result = rt.block_on(run_wasi(
+            &module_path,
+            &module_name,
+            &messages,
+            &workspace_root,
+        ));
         match result {
             Ok(output) => {
                 for line in output.lines() {
@@ -56,9 +63,10 @@ pub fn chat_stream(
 }
 
 async fn run_wasi(
-    wasm_bytes: &[u8],
+    module_path: &str,
     module_name: &str,
     messages: &[Message],
+    workspace_root: &std::path::PathBuf,
 ) -> Result<String, ProviderError> {
     // ── Prepare I/O pipes ─────────────────────────────────────────────────────
     let (stdout_tx, mut stdout_rx) = Pipe::channel();
@@ -90,6 +98,8 @@ async fn run_wasi(
     // ── Compile ───────────────────────────────────────────────────────────────
     let mut store = Store::default();
     let engine = store.engine().clone();
+    let wasm_bytes = db::read_storage_bytes(module_path)
+        .map_err(|e| ProviderError::Io(format!("Failed to read wasm: {e}")))?;
     let module = Module::new(&store, wasm_bytes)
         .map_err(|e| ProviderError::Parse(format!("Failed to compile wasm: {e}")))?;
 
@@ -100,6 +110,10 @@ async fn run_wasi(
         .stdin(Box::new(stdin_rx))
         .stdout(Box::new(stdout_tx))
         .stderr(Box::new(stderr_tx));
+    wasi_env_builder = wasi_env_builder
+        .map_dir("workspace", workspace_root)
+        .map_err(|e| ProviderError::Io(format!("Failed to map workspace: {e}")))?
+        .current_dir("/workspace");
     wasi_env_builder.set_engine(engine);
     let wasi_env = wasi_env_builder
         .build()

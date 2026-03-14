@@ -129,7 +129,7 @@ pub fn ModelSelector(
                                     {
                                         let mid = m.id.clone();
                                         let mlabel = if m.name.is_empty() { m.id.clone() } else { m.name.clone() };
-                                        let size_kb = m.bytes.len() / 1024;
+                                        let size_kb = m.file_size / 1024;
                                         let conn2 = conn.clone();
                                         let cid = chat_id.clone();
                                         let is_active = current_model() == mid;

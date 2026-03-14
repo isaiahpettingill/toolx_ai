@@ -1,17 +1,21 @@
 use dioxus::prelude::*;
 
-use crate::db::WasiApp;
+use crate::db::{KnowledgeBase, WasiApp};
 use crate::tools::{ChatToolConfig, ChatToolKind, AVAILABLE_TOOLS};
 
 #[component]
 pub fn ToolPickerModal(
     active_tools: Signal<Vec<ChatToolConfig>>,
     wasi_apps: Signal<Vec<WasiApp>>,
+    knowledge_bases: Signal<Vec<KnowledgeBase>>,
+    attached_knowledge_bases: Signal<Vec<KnowledgeBase>>,
     on_toggle_tool: EventHandler<ChatToolKind>,
     on_toggle_wasi: EventHandler<String>,
+    on_toggle_knowledge_base: EventHandler<String>,
     on_close: EventHandler<()>,
 ) -> Element {
     let has_wasi = !wasi_apps.read().is_empty();
+    let has_knowledge_bases = !knowledge_bases.read().is_empty();
 
     rsx! {
         div {
@@ -125,6 +129,51 @@ pub fn ToolPickerModal(
                                                 "{app.description}"
                                             }
                                         }
+                                    }
+                                    div { class: if enabled { "tool-card-toggle tool-card-toggle--active" } else { "tool-card-toggle" },
+                                        if enabled { "On" } else { "Off" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if has_knowledge_bases {
+                    div { class: "tool-picker-section-header", "Knowledge Bases" }
+                    for (idx, kb) in knowledge_bases.read().iter().enumerate() {
+                        {
+                            let kb_id = kb.id.clone();
+                            let kb_id2 = kb.id.clone();
+                            let enabled = attached_knowledge_bases
+                                .read()
+                                .iter()
+                                .any(|attached| attached.id == kb_id);
+                            let key = format!("kb-{idx}");
+                            rsx! {
+                                button {
+                                    class: if enabled { "tool-card tool-card--active" } else { "tool-card" },
+                                    key: "{key}",
+                                    onclick: move |_| on_toggle_knowledge_base.call(kb_id2.clone()),
+
+                                    div { class: "tool-card-icon",
+                                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                                            fill: "none", stroke: "currentColor", stroke_width: "2",
+                                            width: "18", height: "18",
+                                            path { d: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20" }
+                                            path { d: "M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" }
+                                        }
+                                    }
+                                    div { class: "tool-card-copy",
+                                        div { class: "tool-card-name", "{kb.name}" }
+                                        div { class: "tool-card-desc",
+                                            if kb.description.is_empty() {
+                                                "Reusable long-form knowledge"
+                                            } else {
+                                                "{kb.description}"
+                                            }
+                                        }
+                                        div { class: "tool-card-hint", "Embeddings: {kb.embedding_model}" }
                                     }
                                     div { class: if enabled { "tool-card-toggle tool-card-toggle--active" } else { "tool-card-toggle" },
                                         if enabled { "On" } else { "Off" }

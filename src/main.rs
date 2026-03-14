@@ -5,6 +5,7 @@ mod components;
 mod db;
 mod markdown;
 mod providers;
+mod rag;
 mod tools;
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");

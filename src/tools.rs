@@ -6,12 +6,14 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use wasmer::{Instance, Module, Store};
 use wasmer_wasix::{Pipe, WasiEnv, WasiFunctionEnv};
 
-use crate::db::WasiApp;
+use crate::db::{self, WasiApp};
+use crate::providers::{ChatAttachment, ChatKnowledgeBaseRef};
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ToolInvocation {
@@ -47,8 +49,12 @@ impl ChatToolKind {
     pub fn description(self) -> &'static str {
         match self {
             ChatToolKind::DuckDuckGoSearch => "Search the web for recent pages and snippets.",
-            ChatToolKind::ReadTextFile => "Read the contents of a text file from the virtual filesystem.",
-            ChatToolKind::WriteTextFile => "Write text content to a file in the virtual filesystem.",
+            ChatToolKind::ReadTextFile => {
+                "Read the contents of a text file from the virtual filesystem."
+            }
+            ChatToolKind::WriteTextFile => {
+                "Write text content to a file in the virtual filesystem."
+            }
         }
     }
 
@@ -69,9 +75,12 @@ pub struct ChatToolConfig {
 
 impl ChatToolConfig {
     pub fn new(kind: ChatToolKind) -> Self {
-        Self { kind, wasi_app_id: None }
+        Self {
+            kind,
+            wasi_app_id: None,
+        }
     }
-    
+
     pub fn new_wasi(app_id: &str) -> Self {
         Self {
             kind: ChatToolKind::DuckDuckGoSearch, // placeholder
@@ -96,24 +105,40 @@ pub const AVAILABLE_TOOLS: &[ChatToolKind] = &[
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VirtualFs {
+    pub chat_id: String,
     pub files: HashMap<String, String>,
 }
 
 impl VirtualFs {
     pub fn read_text_file(&self, path: &str) -> Result<String, String> {
+        if let Some(content) = self.files.get(path) {
+            return Ok(content.clone());
+        }
+
+        let disk_path = db::chat_vfs_root(&self.chat_id).join(path.trim_start_matches('/'));
+        if disk_path.exists() {
+            return std::fs::read_to_string(disk_path).map_err(|err| err.to_string());
+        }
+
         self.files
             .get(path)
             .cloned()
             .ok_or_else(|| format!("File not found: {}", path))
     }
-    
+
     pub fn write_text_file(&mut self, path: &str, content: &str) -> Result<(), String> {
         self.files.insert(path.to_string(), content.to_string());
+        db::upsert_chat_vfs_text_file(&self.chat_id, path, content)
+            .map_err(|err| err.to_string())?;
         Ok(())
     }
-    
+
     pub fn list_files(&self) -> Vec<String> {
-        self.files.keys().cloned().collect()
+        let mut files: Vec<String> = self.files.keys().cloned().collect();
+        files.extend(db::list_chat_vfs_paths(&self.chat_id));
+        files.sort();
+        files.dedup();
+        files
     }
 }
 
@@ -123,8 +148,9 @@ pub fn new_vfs() -> VfsHandle {
     Arc::new(Mutex::new(VirtualFs::default()))
 }
 
-pub fn vfs_from_json(json: &str) -> VfsHandle {
-    let vfs: VirtualFs = serde_json::from_str(json).unwrap_or_default();
+pub fn vfs_from_json(chat_id: &str, json: &str) -> VfsHandle {
+    let mut vfs: VirtualFs = serde_json::from_str(json).unwrap_or_default();
+    vfs.chat_id = chat_id.to_string();
     Arc::new(Mutex::new(vfs))
 }
 
@@ -154,6 +180,9 @@ pub fn build_agent_preamble(
     model: &str,
     active_tools: &[ChatToolConfig],
     wasi_apps: &[WasiApp],
+    attachments: &[ChatAttachment],
+    knowledge_bases: &[ChatKnowledgeBaseRef],
+    retrieved_context: &str,
 ) -> String {
     let base = if system_prompt.trim().is_empty() {
         "You are a helpful assistant.".to_string()
@@ -181,8 +210,7 @@ pub fn build_agent_preamble(
 
     if has_tool(active_tools, ChatToolKind::ReadTextFile) {
         inventory.push(
-            "- `read_text_file(path)`: read a text file from the virtual filesystem."
-                .to_string(),
+            "- `read_text_file(path)`: read a text file from the virtual filesystem.".to_string(),
         );
     }
 
@@ -193,7 +221,10 @@ pub fn build_agent_preamble(
         );
     }
 
-    for app_id in active_tools.iter().filter_map(|tool| tool.wasi_app_id.as_deref()) {
+    for app_id in active_tools
+        .iter()
+        .filter_map(|tool| tool.wasi_app_id.as_deref())
+    {
         if let Some(app) = wasi_apps.iter().find(|app| app.id == app_id) {
             let tool_name = WasiAppTool::normalize_tool_name(&app.name);
             let summary = if app.description.trim().is_empty() {
@@ -241,6 +272,66 @@ pub fn build_agent_preamble(
         );
     }
 
+    if !attachments.is_empty() {
+        let attachment_lines = attachments
+            .iter()
+            .map(|attachment| {
+                if attachment.inline_context.is_empty() {
+                    format!("- `{}` at `{}`", attachment.name, attachment.path)
+                } else {
+                    format!(
+                        "- `{}` at `{}` (short text already included in context)",
+                        attachment.name, attachment.path
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        notes.push(format!("Files available in this chat:\n{attachment_lines}"));
+    }
+
+    if !knowledge_bases.is_empty() {
+        let lines = knowledge_bases
+            .iter()
+            .map(|kb| {
+                if kb.description.trim().is_empty() {
+                    format!("- `{}`", kb.name)
+                } else {
+                    format!("- `{}`: {}", kb.name, kb.description.trim())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        notes.push(format!("Attached knowledge bases:\n{lines}"));
+    }
+
+    let inline_texts = attachments
+        .iter()
+        .filter(|attachment| !attachment.inline_context.is_empty())
+        .map(|attachment| {
+            format!(
+                "[File: {} at {}]\n{}",
+                attachment.name, attachment.path, attachment.inline_context
+            )
+        })
+        .collect::<Vec<_>>();
+    if !inline_texts.is_empty() {
+        notes.push(format!(
+            "Short text files uploaded to this chat are part of the active context:\n{}",
+            inline_texts.join("\n\n")
+        ));
+    }
+
+    if !retrieved_context.trim().is_empty() {
+        notes.push(format!(
+            "Retrieved long-document context for the current request:\n{}",
+            retrieved_context.trim()
+        ));
+        notes.push(
+            "When the retrieved context answers the question, ground your answer in it and mention the relevant file names. If the retrieval is insufficient, say so instead of inventing details.".to_string()
+        );
+    }
+
     if notes.is_empty() {
         base
     } else {
@@ -270,7 +361,8 @@ impl Tool for DuckDuckGoSearchTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Search DuckDuckGo for current web results and short snippets.".to_string(),
+            description: "Search DuckDuckGo for current web results and short snippets."
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -311,9 +403,7 @@ fn format_duckduckgo_results(query: &str, results: &[LiteSearchResult]) -> Strin
         return format!("DuckDuckGo search for '{query}' returned no results.");
     }
 
-    let mut lines = vec![format!(
-        "DuckDuckGo search results for '{query}':"
-    )];
+    let mut lines = vec![format!("DuckDuckGo search results for '{query}':")];
 
     for (index, result) in results.iter().enumerate() {
         let title = result.title.trim();
@@ -337,21 +427,16 @@ fn format_duckduckgo_results(query: &str, results: &[LiteSearchResult]) -> Strin
 }
 
 pub fn parse_tool_invocations(response: &str) -> (String, Vec<ToolInvocation>) {
-    let search_patterns = [
-        "[Searches:",
-        "[Search:",
-        "Searches:",
-        "Search:",
-    ];
-    
+    let search_patterns = ["[Searches:", "[Search:", "Searches:", "Search:"];
+
     for search_pattern in &search_patterns {
         if let Some(start_idx) = response.to_lowercase().find(&search_pattern.to_lowercase()) {
             let before_searches = response[..start_idx].trim();
-            
+
             let rest = &response[start_idx..];
             if let Some(end_bracket) = rest.find(']') {
                 let searches_part = &rest[search_pattern.len()..end_bracket];
-                
+
                 let queries: Vec<ToolInvocation> = searches_part
                     .split(',')
                     .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
@@ -362,7 +447,7 @@ pub fn parse_tool_invocations(response: &str) -> (String, Vec<ToolInvocation>) {
                         collapsed: false,
                     })
                     .collect();
-                
+
                 if !queries.is_empty() {
                     return (before_searches.to_string(), queries);
                 }
@@ -372,7 +457,13 @@ pub fn parse_tool_invocations(response: &str) -> (String, Vec<ToolInvocation>) {
                     .flat_map(|p| rest.split(p))
                     .skip(1)
                     .next()
-                    .map(|s| s.trim().split(',').map(|q| q.trim().trim_matches('"').trim_matches('\'').to_string()).filter(|q| !q.is_empty()).collect::<Vec<_>>())
+                    .map(|s| {
+                        s.trim()
+                            .split(',')
+                            .map(|q| q.trim().trim_matches('"').trim_matches('\'').to_string())
+                            .filter(|q| !q.is_empty())
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_default()
                     .into_iter()
                     .map(|query| ToolInvocation {
@@ -381,14 +472,14 @@ pub fn parse_tool_invocations(response: &str) -> (String, Vec<ToolInvocation>) {
                         collapsed: false,
                     })
                     .collect();
-                
+
                 if !queries.is_empty() {
                     return (before_searches.to_string(), queries);
                 }
             }
         }
     }
-    
+
     (response.to_string(), Vec::new())
 }
 
@@ -424,7 +515,8 @@ impl Tool for ReadTextFileTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Read the contents of a text file from the virtual filesystem.".to_string(),
+            description: "Read the contents of a text file from the virtual filesystem."
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -439,7 +531,10 @@ impl Tool for ReadTextFileTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let vfs = self.vfs.lock().map_err(|e| ReadTextFileError(e.to_string()))?;
+        let vfs = self
+            .vfs
+            .lock()
+            .map_err(|e| ReadTextFileError(e.to_string()))?;
         vfs.read_text_file(&args.path).map_err(ReadTextFileError)
     }
 }
@@ -496,8 +591,12 @@ impl Tool for WriteTextFileTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let mut vfs = self.vfs.lock().map_err(|e| WriteTextFileError(e.to_string()))?;
-        vfs.write_text_file(&args.path, &args.content).map_err(WriteTextFileError)?;
+        let mut vfs = self
+            .vfs
+            .lock()
+            .map_err(|e| WriteTextFileError(e.to_string()))?;
+        vfs.write_text_file(&args.path, &args.content)
+            .map_err(WriteTextFileError)?;
         Ok(format!("Successfully wrote to {}", args.path))
     }
 }
@@ -519,8 +618,8 @@ pub struct WasiAppTool {
     pub name: String,
     pub description: String,
     pub help_text: String,
-    pub bytes: Vec<u8>,
-    pub vfs: VfsHandle,
+    pub module_path: String,
+    pub vfs_root: PathBuf,
 }
 
 impl WasiAppTool {
@@ -528,15 +627,15 @@ impl WasiAppTool {
         name: &str,
         description: &str,
         help_text: &str,
-        bytes: Vec<u8>,
-        vfs: VfsHandle,
+        module_path: String,
+        vfs_root: PathBuf,
     ) -> Self {
         Self {
             name: name.to_string(),
             description: description.to_string(),
             help_text: help_text.to_string(),
-            bytes,
-            vfs,
+            module_path,
+            vfs_root,
         }
     }
 
@@ -618,13 +717,23 @@ impl Tool for WasiAppTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        run_wasi_cli(&self.bytes, &self.name, &args.args)
-            .await
-            .map_err(WasiAppError)
+        run_wasi_cli(
+            &self.module_path,
+            &self.name,
+            &args.args,
+            Some(&self.vfs_root),
+        )
+        .await
+        .map_err(WasiAppError)
     }
 }
 
-async fn run_wasi_cli(wasm_bytes: &[u8], module_name: &str, cli_args: &str) -> Result<String, String> {
+async fn run_wasi_cli(
+    module_path: &str,
+    module_name: &str,
+    cli_args: &str,
+    vfs_root: Option<&PathBuf>,
+) -> Result<String, String> {
     let (stdout_tx, mut stdout_rx) = Pipe::channel();
     let (stderr_tx, mut stderr_rx) = Pipe::channel();
 
@@ -634,15 +743,23 @@ async fn run_wasi_cli(wasm_bytes: &[u8], module_name: &str, cli_args: &str) -> R
 
     let mut store = Store::default();
     let engine = store.engine().clone();
-    let module = Module::new(&store, wasm_bytes)
-        .map_err(|e| format!("Failed to compile wasm: {e}"))?;
+    let wasm_bytes =
+        db::read_storage_bytes(module_path).map_err(|e| format!("Failed to read wasm: {e}"))?;
+    let module =
+        Module::new(&store, wasm_bytes).map_err(|e| format!("Failed to compile wasm: {e}"))?;
 
     let mut wasi_env_builder = WasiEnv::builder(module_name)
         .args(&args_vec)
         .stdout(Box::new(stdout_tx))
         .stderr(Box::new(stderr_tx));
+    if let Some(vfs_root) = vfs_root {
+        wasi_env_builder = wasi_env_builder
+            .map_dir("workspace", vfs_root)
+            .map_err(|e| format!("Failed to map workspace: {e}"))?
+            .current_dir("/workspace");
+    }
     wasi_env_builder.set_engine(engine);
-    
+
     let wasi_env = wasi_env_builder
         .build()
         .map_err(|e| format!("WASI env build error: {e}"))?;
@@ -654,7 +771,7 @@ async fn run_wasi_cli(wasm_bytes: &[u8], module_name: &str, cli_args: &str) -> R
 
     let instance = Instance::new(&mut store, &module, &imports)
         .map_err(|e| format!("Failed to instantiate wasm: {e}"))?;
-    
+
     func_env
         .initialize(&mut store, instance.clone())
         .map_err(|e| format!("Failed to initialize WASI env: {e}"))?;
@@ -665,7 +782,9 @@ async fn run_wasi_cli(wasm_bytes: &[u8], module_name: &str, cli_args: &str) -> R
         .or_else(|_| instance.exports.get_function("main"));
 
     if let Ok(start) = start {
-        start.call(&mut store, &[]).map_err(|e| format!("WASI execution error: {e}"))?;
+        start
+            .call(&mut store, &[])
+            .map_err(|e| format!("WASI execution error: {e}"))?;
     }
 
     drop(instance);
@@ -694,13 +813,39 @@ async fn run_wasi_cli(wasm_bytes: &[u8], module_name: &str, cli_args: &str) -> R
 }
 
 pub async fn generate_help_text(wasm_bytes: &[u8], module_name: &str) -> String {
+    let temp_id = format!("help-{}", uuid::Uuid::new_v4());
+    let root = db::storage_root().join("temp");
+    let _ = std::fs::create_dir_all(&root);
+    let temp_path = root.join(format!(
+        "{}-{}.wasm",
+        temp_id,
+        normalize_temp_name(module_name)
+    ));
+    if std::fs::write(&temp_path, wasm_bytes).is_err() {
+        return "No help available".to_string();
+    }
+    let temp_relative = temp_path
+        .strip_prefix(db::storage_root())
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
     for help_arg in &["-h", "--help", "help"] {
-        let result = run_wasi_cli(wasm_bytes, module_name, help_arg).await;
+        let result = run_wasi_cli(&temp_relative, module_name, help_arg, None).await;
         if let Ok(output) = result {
-            if !output.contains("unrecognized") && !output.contains("unknown") && !output.contains("invalid") {
+            if !output.contains("unrecognized")
+                && !output.contains("unknown")
+                && !output.contains("invalid")
+            {
+                let _ = std::fs::remove_file(&temp_path);
                 return output;
             }
         }
     }
+    let _ = std::fs::remove_file(&temp_path);
     "No help available".to_string()
+}
+
+fn normalize_temp_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
 }

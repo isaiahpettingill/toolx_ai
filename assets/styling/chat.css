@@ -599,6 +599,75 @@ html, body {
     flex-wrap: wrap;
 }
 
+#chat-meta-row,
+#chat-file-list {
+    max-width: 820px;
+    margin: 0 auto 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.chat-upload-label,
+#chat-embed-select {
+    min-height: 32px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border-light);
+    background: var(--bg-raised);
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+
+.chat-upload-label {
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.chat-upload-label:hover,
+#chat-embed-select:hover {
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--accent) 35%, var(--border-light));
+}
+
+#chat-embed-select {
+    outline: none;
+    cursor: pointer;
+}
+
+.chat-file-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 30px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: rgba(255,255,255,0.03);
+    color: var(--text-muted);
+    font-size: 0.76rem;
+}
+
+.chat-file-chip--inline {
+    border-color: color-mix(in srgb, #0ca678 45%, transparent);
+    color: #b2f2dd;
+}
+
+.chat-file-chip--indexed,
+.chat-kb-chip {
+    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    color: var(--text);
+}
+
+.chat-file-meta {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.66rem;
+    color: var(--text-dim);
+}
+
 .chat-tool-chip,
 .chat-tools-empty {
     display: inline-flex;
@@ -1025,6 +1094,15 @@ html, body {
     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
     gap: 14px;
     overflow-y: auto;
+}
+
+.tool-picker-section-header {
+    grid-column: 1 / -1;
+    font-size: 0.74rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-top: 6px;
 }
 
 .tool-card {

@@ -6,9 +6,10 @@ use std::sync::{
     Arc,
 };
 
-use crate::db::{self, WasmModel};
+use crate::db::{self, KnowledgeBase, WasmModel};
 use crate::markdown;
-use crate::providers::{self, Message};
+use crate::providers::{self, ChatAttachment, ChatKnowledgeBaseRef, Message};
+use crate::rag;
 use crate::tools::{self};
 
 use super::types::{run_builtin, UiMessage, PROVIDER_OLLAMA, PROVIDER_WASI};
@@ -21,15 +22,21 @@ pub fn ChatPane(
     current_model: Signal<String>,
     current_provider: Signal<String>,
     mut current_system_prompt: Signal<String>,
+    current_embedding_model: Signal<String>,
     active_tools: Signal<Vec<tools::ChatToolConfig>>,
     ollama_base_url: Signal<String>,
     wasm_models: Signal<Vec<WasmModel>>,
     wasi_apps: Signal<Vec<db::WasiApp>>,
+    chat_knowledge_bases: Signal<Vec<KnowledgeBase>>,
     mut streaming_chats: Signal<HashMap<String, Arc<AtomicBool>>>,
     on_open_tool_picker: EventHandler<MouseEvent>,
     on_messages_changed: EventHandler<()>,
 ) -> Element {
     let mut input = use_signal(String::new);
+    let mut uploaded_files: Signal<Vec<db::ChatFile>> =
+        use_signal(|| db::list_chat_files(&conn.read(), &chat_id).unwrap_or_default());
+    let mut upload_error = use_signal(|| Option::<String>::None);
+    let mut uploading_files = use_signal(|| false);
 
     let is_streaming = streaming_chats.read().contains_key(&chat_id);
 
@@ -38,6 +45,12 @@ pub fn ChatPane(
 
     use_effect(move || {
         sys_prompt_draft.set(current_system_prompt.read().clone());
+    });
+
+    let current_chat_id_for_files = chat_id.clone();
+    use_effect(move || {
+        uploaded_files
+            .set(db::list_chat_files(&conn.read(), &current_chat_id_for_files).unwrap_or_default());
     });
 
     let msg_count = messages.read().len();
@@ -84,7 +97,10 @@ pub fn ChatPane(
             let active_tools_list = active_tools.read().clone();
             let wasi_apps_list = wasi_apps.read().clone();
             let vfs_json = db::get_chat_vfs(&conn.read(), &chat_id).unwrap_or_default();
-            let vfs_handle = tools::vfs_from_json(&serde_json::to_string(&vfs_json).unwrap_or_default());
+            let vfs_handle = tools::vfs_from_json(
+                &chat_id,
+                &serde_json::to_string(&vfs_json).unwrap_or_default(),
+            );
 
             if let Ok(user_msg) = db::add_message(&conn.read(), &chat_id, "user", &text) {
                 messages.write().push(UiMessage::from_db(&user_msg));
@@ -109,14 +125,37 @@ pub fn ChatPane(
                     .collect();
 
                 let base_url = ollama_base_url.read().clone();
+                let attachments = db::list_chat_files(&conn.read(), &chat_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|file| ChatAttachment {
+                        name: file.display_name,
+                        path: file.path,
+                        inline_context: file.inline_context,
+                        is_text: file.is_text,
+                    })
+                    .collect::<Vec<_>>();
+                let knowledge_base_refs = chat_knowledge_bases
+                    .read()
+                    .iter()
+                    .map(|kb| ChatKnowledgeBaseRef {
+                        name: kb.name.clone(),
+                        description: kb.description.clone(),
+                    })
+                    .collect::<Vec<_>>();
                 let stream_id = uuid::Uuid::new_v4().to_string();
-                messages.write().push(UiMessage::new_streaming(stream_id.clone()));
+                messages
+                    .write()
+                    .push(UiMessage::new_streaming(stream_id.clone()));
 
                 let cancel = Arc::new(AtomicBool::new(false));
-                streaming_chats.write().insert(chat_id.clone(), cancel.clone());
+                streaming_chats
+                    .write()
+                    .insert(chat_id.clone(), cancel.clone());
 
                 let conn2 = conn.clone();
                 let chat_id2 = chat_id.clone();
+                let embedding_model = current_embedding_model.read().clone();
                 spawn(async move {
                     if cancel.load(Ordering::Relaxed) {
                         messages.write().retain(|m| m.id != stream_id);
@@ -124,6 +163,18 @@ pub fn ChatPane(
                         on_messages_changed.call(());
                         return;
                     }
+
+                    let retrieved_context = rag::retrieve_for_chat(
+                        &conn2.read(),
+                        &base_url,
+                        &chat_id2,
+                        &embedding_model,
+                        &text,
+                        6,
+                    )
+                    .await
+                    .map(|chunks| rag::format_retrieved_context(&chunks))
+                    .unwrap_or_default();
 
                     let mut rx = providers::ollama::chat_stream(
                         base_url,
@@ -134,6 +185,9 @@ pub fn ChatPane(
                         active_tools_list,
                         wasi_apps_list,
                         vfs_handle,
+                        attachments,
+                        knowledge_base_refs,
+                        retrieved_context,
                     );
                     let mut full_content = String::new();
 
@@ -183,10 +237,8 @@ pub fn ChatPane(
                                         "assistant",
                                         &final_content,
                                     ) {
-                                        if let Some(msg) = messages
-                                            .write()
-                                            .iter_mut()
-                                            .find(|m| m.id == stream_id)
+                                        if let Some(msg) =
+                                            messages.write().iter_mut().find(|m| m.id == stream_id)
                                         {
                                             msg.id = saved.id;
                                             msg.content = final_content.clone();
@@ -203,16 +255,20 @@ pub fn ChatPane(
                             }
                             Err(e) => {
                                 let rendered = format!("Error: {e}");
-                                if let Ok(saved) =
-                                    db::add_message(&conn2.read(), &chat_id2, "assistant", &rendered)
-                                {
+                                if let Ok(saved) = db::add_message(
+                                    &conn2.read(),
+                                    &chat_id2,
+                                    "assistant",
+                                    &rendered,
+                                ) {
                                     if let Some(msg) =
                                         messages.write().iter_mut().find(|m| m.id == stream_id)
                                     {
                                         msg.id = saved.id;
                                         msg.content = rendered.clone();
-                                        msg.html =
-                                            format!("<span style='color:#e03131'>{rendered}</span>");
+                                        msg.html = format!(
+                                            "<span style='color:#e03131'>{rendered}</span>"
+                                        );
                                         msg.streaming = false;
                                     }
                                 }
@@ -230,9 +286,12 @@ pub fn ChatPane(
                 let wasm_entry = wasm_models.read().iter().find(|m| m.id == model).cloned();
                 match wasm_entry {
                     None => {
-                        let err =
-                            format!("WASI module '{}' not found. Upload it in Provider Settings.", model);
-                        if let Ok(asst_msg) = db::add_message(&conn.read(), &chat_id, "assistant", &err)
+                        let err = format!(
+                            "WASI module '{}' not found. Upload it in Provider Settings.",
+                            model
+                        );
+                        if let Ok(asst_msg) =
+                            db::add_message(&conn.read(), &chat_id, "assistant", &err)
                         {
                             messages.write().push(UiMessage::from_db(&asst_msg));
                         }
@@ -246,30 +305,31 @@ pub fn ChatPane(
                                 content: system_prompt,
                             });
                         }
-                        history.extend(
-                            messages
-                                .read()
-                                .iter()
-                                .filter(|m| !m.streaming)
-                                .map(|m| Message {
-                                    role: m.role.clone(),
-                                    content: m.content.clone(),
-                                }),
-                        );
+                        history.extend(messages.read().iter().filter(|m| !m.streaming).map(|m| {
+                            Message {
+                                role: m.role.clone(),
+                                content: m.content.clone(),
+                            }
+                        }));
 
                         let stream_id = uuid::Uuid::new_v4().to_string();
-                        messages.write().push(UiMessage::new_streaming(stream_id.clone()));
+                        messages
+                            .write()
+                            .push(UiMessage::new_streaming(stream_id.clone()));
 
                         let cancel = Arc::new(AtomicBool::new(false));
-                        streaming_chats.write().insert(chat_id.clone(), cancel.clone());
+                        streaming_chats
+                            .write()
+                            .insert(chat_id.clone(), cancel.clone());
 
                         let conn2 = conn.clone();
                         let chat_id2 = chat_id.clone();
                         spawn(async move {
                             let mut rx = providers::wasi::chat_stream(
-                                wasm_model.bytes,
+                                wasm_model.file_path,
                                 wasm_model.name,
                                 history,
+                                db::chat_vfs_root(&chat_id2),
                             );
                             let mut full_content = String::new();
 
@@ -303,22 +363,19 @@ pub fn ChatPane(
                                     Some(Ok(token)) => {
                                         full_content.push_str(&token);
                                         let html = markdown::render(&full_content);
-                                        if let Some(msg) = messages
-                                            .write()
-                                            .iter_mut()
-                                            .find(|m| m.id == stream_id)
+                                        if let Some(msg) =
+                                            messages.write().iter_mut().find(|m| m.id == stream_id)
                                         {
                                             msg.content = full_content.clone();
                                             msg.html = html;
                                         }
                                     }
                                     Some(Err(e)) => {
-                                        let err_html =
-                                            format!("<span style='color:#e03131'>WASI Error: {e}</span>");
-                                        if let Some(msg) = messages
-                                            .write()
-                                            .iter_mut()
-                                            .find(|m| m.id == stream_id)
+                                        let err_html = format!(
+                                            "<span style='color:#e03131'>WASI Error: {e}</span>"
+                                        );
+                                        if let Some(msg) =
+                                            messages.write().iter_mut().find(|m| m.id == stream_id)
                                         {
                                             msg.html = err_html;
                                             msg.streaming = false;
@@ -331,9 +388,12 @@ pub fn ChatPane(
                                 }
                             }
 
-                            if let Ok(saved) =
-                                db::add_message(&conn2.read(), &chat_id2, "assistant", &full_content)
-                            {
+                            if let Ok(saved) = db::add_message(
+                                &conn2.read(),
+                                &chat_id2,
+                                "assistant",
+                                &full_content,
+                            ) {
                                 if let Some(msg) =
                                     messages.write().iter_mut().find(|m| m.id == stream_id)
                                 {
@@ -348,12 +408,109 @@ pub fn ChatPane(
                 }
             } else {
                 let response_text = run_builtin(&model, &text);
-                if let Ok(asst_msg) = db::add_message(&conn.read(), &chat_id, "assistant", &response_text)
+                if let Ok(asst_msg) =
+                    db::add_message(&conn.read(), &chat_id, "assistant", &response_text)
                 {
                     messages.write().push(UiMessage::from_db(&asst_msg));
                 }
                 on_messages_changed.call(());
             }
+        }
+    };
+
+    let on_upload_files = {
+        let conn = conn.clone();
+        let chat_id = chat_id.clone();
+        move |event: FormEvent| {
+            let target_chat_id = chat_id.clone();
+            let files = event.files();
+            if files.is_empty() {
+                return;
+            }
+
+            upload_error.set(None);
+            uploading_files.set(true);
+            let base_url = ollama_base_url.read().clone();
+            let embedding_model = current_embedding_model.read().clone();
+            spawn(async move {
+                for file in files {
+                    let name = file.name();
+                    let mime_type = file.content_type().unwrap_or_default();
+                    match file.read_bytes().await {
+                        Ok(bytes) => {
+                            let extracted_text = rag::extract_text(&bytes, &mime_type);
+                            let inline_context = extracted_text
+                                .as_deref()
+                                .map(rag::inline_context_for_text)
+                                .unwrap_or_default();
+                            let is_text = extracted_text.is_some();
+                            let path = rag::normalize_upload_path(&name);
+
+                            match db::add_chat_file(
+                                &conn.read(),
+                                &target_chat_id,
+                                &path,
+                                &name,
+                                &mime_type,
+                                &bytes,
+                                is_text,
+                                &inline_context,
+                            ) {
+                                Ok(saved_file) => {
+                                    if is_text && inline_context.is_empty() {
+                                        if let Err(err) = rag::index_chat_file(
+                                            &conn.read(),
+                                            &base_url,
+                                            &embedding_model,
+                                            &saved_file,
+                                        )
+                                        .await
+                                        {
+                                            upload_error.set(Some(format!(
+                                                "Failed to index {name}: {err}"
+                                            )));
+                                        }
+                                    }
+                                    uploaded_files.write().push(saved_file);
+                                }
+                                Err(err) => {
+                                    upload_error.set(Some(format!("Failed to save {name}: {err}")));
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            upload_error.set(Some(format!("Failed to read {name}: {err}")));
+                        }
+                    }
+                }
+                on_messages_changed.call(());
+                uploading_files.set(false);
+            });
+        }
+    };
+
+    let on_change_embedding_model = {
+        let conn = conn.clone();
+        let chat_id = chat_id.clone();
+        move |event: FormEvent| {
+            let next_model = event.value();
+            if next_model.trim().is_empty() {
+                return;
+            }
+            current_embedding_model.set(next_model.clone());
+            db::update_chat_embedding_model(&conn.read(), &chat_id, &next_model).ok();
+
+            let base_url = ollama_base_url.read().clone();
+            let files_to_reindex = uploaded_files()
+                .into_iter()
+                .filter(|file| file.is_text && file.inline_context.is_empty())
+                .collect::<Vec<_>>();
+            spawn(async move {
+                for file in files_to_reindex {
+                    let _ = rag::index_chat_file(&conn.read(), &base_url, &next_model, &file).await;
+                }
+                on_messages_changed.call(());
+            });
         }
     };
 
@@ -569,6 +726,65 @@ pub fn ChatPane(
                     }
                 }
 
+                div { id: "chat-meta-row",
+                    label { class: "chat-upload-label", r#for: "chat-file-input",
+                        if uploading_files() { "Uploading files..." } else { "Upload files" }
+                    }
+                    input {
+                        id: "chat-file-input",
+                        r#type: "file",
+                        multiple: true,
+                        style: "display:none",
+                        onchange: on_upload_files,
+                    }
+
+                    select {
+                        id: "chat-embed-select",
+                        value: "{current_embedding_model}",
+                        onchange: on_change_embedding_model,
+                        for model in rag::default_embedding_models() {
+                            option { value: "{model}", "Embeddings: {model}" }
+                        }
+                    }
+
+                    for kb in chat_knowledge_bases.read().iter() {
+                        span { class: "chat-tool-chip chat-kb-chip", key: "kb-{kb.id}",
+                            "KB: {kb.name}"
+                        }
+                    }
+                }
+
+                if let Some(error) = upload_error() {
+                    p { id: "input-hint", style: "color:#e03131;", "{error}" }
+                }
+
+                if !uploaded_files.read().is_empty() {
+                    div { id: "chat-file-list",
+                        for file in uploaded_files.read().iter() {
+                            {
+                                let status = if !file.is_text {
+                                    "binary"
+                                } else if !file.inline_context.is_empty() {
+                                    "inline"
+                                } else {
+                                    "indexed"
+                                };
+                                let class_name = match status {
+                                    "inline" => "chat-file-chip chat-file-chip--inline",
+                                    "indexed" => "chat-file-chip chat-file-chip--indexed",
+                                    _ => "chat-file-chip",
+                                };
+                                rsx! {
+                                    div { class: class_name, key: "file-{file.id}",
+                                        span { "{file.display_name}" }
+                                        span { class: "chat-file-meta", "{status}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 div { id: "chat-input-bar",
                     textarea {
                         id: "chat-input",
@@ -612,7 +828,7 @@ pub fn ChatPane(
                         }
                     }
                 }
-                p { id: "input-hint", "Shift+Enter for newline. Enabled tools are available to Ollama automatically." }
+                p { id: "input-hint", "Shift+Enter for newline. Short text files are added directly to context; larger text files are indexed for retrieval." }
             }
         }
     }
