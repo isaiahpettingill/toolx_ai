@@ -9,7 +9,7 @@ use std::sync::{
 use crate::db::{self, WasmModel};
 use crate::markdown;
 use crate::providers::{self, Message};
-use crate::tools::{self, VfsHandle};
+use crate::tools::{self};
 
 use super::types::{run_builtin, UiMessage, PROVIDER_OLLAMA, PROVIDER_WASI};
 
@@ -125,7 +125,7 @@ pub fn ChatPane(
                         return;
                     }
 
-                    match providers::ollama::chat(
+                    let mut rx = providers::ollama::chat_stream(
                         base_url,
                         model,
                         system_prompt,
@@ -134,39 +134,91 @@ pub fn ChatPane(
                         active_tools_list,
                         wasi_apps_list,
                         vfs_handle,
-                    )
-                    .await
-                    {
-                        Ok(result) => {
-                            eprintln!("[DEBUG] Raw response: {}", result.content);
-                            if let Ok(saved) =
-                                db::add_message(&conn2.read(), &chat_id2, "assistant", &result.content)
-                            {
-                                if let Some(msg) =
-                                    messages.write().iter_mut().find(|m| m.id == stream_id)
-                                {
-                                    msg.id = saved.id;
-                                    msg.content = result.content.clone();
-                                    msg.html = markdown::render(&result.content);
-                                    msg.streaming = false;
-                                    msg.tool_invocations = result.tool_invocations;
+                    );
+                    let mut full_content = String::new();
+
+                    while let Some(chunk) = rx.recv().await {
+                        if cancel.load(Ordering::Relaxed) {
+                            if !full_content.is_empty() {
+                                if let Ok(saved) = db::add_message(
+                                    &conn2.read(),
+                                    &chat_id2,
+                                    "assistant",
+                                    &full_content,
+                                ) {
+                                    if let Some(msg) =
+                                        messages.write().iter_mut().find(|m| m.id == stream_id)
+                                    {
+                                        msg.id = saved.id;
+                                        msg.content = full_content.clone();
+                                        msg.html = markdown::render(&full_content);
+                                        msg.streaming = false;
+                                    }
+                                }
+                            } else {
+                                messages.write().retain(|m| m.id != stream_id);
+                            }
+                            streaming_chats.write().remove(&chat_id2);
+                            on_messages_changed.call(());
+                            return;
+                        }
+
+                        match chunk {
+                            Ok(stream_chunk) => {
+                                if !stream_chunk.delta.is_empty() {
+                                    full_content.push_str(&stream_chunk.delta);
+                                    let html = markdown::render(&full_content);
+                                    if let Some(msg) =
+                                        messages.write().iter_mut().find(|m| m.id == stream_id)
+                                    {
+                                        msg.content = full_content.clone();
+                                        msg.html = html;
+                                    }
+                                }
+
+                                if let Some(final_content) = stream_chunk.final_content {
+                                    if let Ok(saved) = db::add_message(
+                                        &conn2.read(),
+                                        &chat_id2,
+                                        "assistant",
+                                        &final_content,
+                                    ) {
+                                        if let Some(msg) = messages
+                                            .write()
+                                            .iter_mut()
+                                            .find(|m| m.id == stream_id)
+                                        {
+                                            msg.id = saved.id;
+                                            msg.content = final_content.clone();
+                                            msg.html = markdown::render(&final_content);
+                                            msg.streaming = false;
+                                            msg.tool_invocations =
+                                                stream_chunk.tool_invocations.unwrap_or_default();
+                                        }
+                                    }
+                                    streaming_chats.write().remove(&chat_id2);
+                                    on_messages_changed.call(());
+                                    return;
                                 }
                             }
-                        }
-                        Err(e) => {
-                            let rendered = format!("Error: {e}");
-                            if let Ok(saved) =
-                                db::add_message(&conn2.read(), &chat_id2, "assistant", &rendered)
-                            {
-                                if let Some(msg) =
-                                    messages.write().iter_mut().find(|m| m.id == stream_id)
+                            Err(e) => {
+                                let rendered = format!("Error: {e}");
+                                if let Ok(saved) =
+                                    db::add_message(&conn2.read(), &chat_id2, "assistant", &rendered)
                                 {
-                                    msg.id = saved.id;
-                                    msg.content = rendered.clone();
-                                    msg.html =
-                                        format!("<span style='color:#e03131'>{rendered}</span>");
-                                    msg.streaming = false;
+                                    if let Some(msg) =
+                                        messages.write().iter_mut().find(|m| m.id == stream_id)
+                                    {
+                                        msg.id = saved.id;
+                                        msg.content = rendered.clone();
+                                        msg.html =
+                                            format!("<span style='color:#e03131'>{rendered}</span>");
+                                        msg.streaming = false;
+                                    }
                                 }
+                                streaming_chats.write().remove(&chat_id2);
+                                on_messages_changed.call(());
+                                return;
                             }
                         }
                     }
@@ -494,9 +546,23 @@ pub fn ChatPane(
                         if active_tools.read().is_empty() {
                             span { class: "chat-tools-empty", "No tools enabled" }
                         } else {
-                            for tool in active_tools.read().iter() {
-                                span { class: "chat-tool-chip", key: "{tool.kind.id()}",
-                                    "{tool.kind.label()}"
+                            for (idx, tool) in active_tools.read().iter().enumerate() {
+                                {
+                                    let key = format!("tool-{}-{}", idx, tool.wasi_app_id.as_deref().unwrap_or(tool.kind.id()));
+                                    let label = if let Some(ref app_id) = tool.wasi_app_id {
+                                        if let Some(app) = wasi_apps.read().iter().find(|a| &a.id == app_id) {
+                                            app.name.clone()
+                                        } else {
+                                            tool.kind.label().to_string()
+                                        }
+                                    } else {
+                                        tool.kind.label().to_string()
+                                    };
+                                    rsx! {
+                                        span { class: "chat-tool-chip", key: "{key}",
+                                            "{label}"
+                                        }
+                                    }
                                 }
                             }
                         }

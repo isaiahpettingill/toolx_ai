@@ -87,16 +87,18 @@ pub fn ModelSelector(
                     onclick: move |_| *model_open.write() ^= true,
                     span {
                         // Show a friendly name: for WASI show the module filename, else show raw id
-                        {
-                            if is_wasi {
-                                wasm_models.read()
-                                    .iter()
-                                    .find(|m| m.id == current_model())
-                                    .map(|m| m.name.clone())
-                                    .unwrap_or_else(|| current_model())
+                        if is_wasi {
+                            if let Some(m) = wasm_models.read().iter().find(|m| m.id == current_model()) {
+                                if m.name.is_empty() {
+                                    "{current_model()}"
+                                } else {
+                                    "{m.name}"
+                                }
                             } else {
-                                current_model()
+                                "{current_model()}"
                             }
+                        } else {
+                            "{current_model()}"
                         }
                     }
                     svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
@@ -126,7 +128,7 @@ pub fn ModelSelector(
                                 for m in wasm_models.read().clone().into_iter() {
                                     {
                                         let mid = m.id.clone();
-                                        let mlabel = m.name.clone();
+                                        let mlabel = if m.name.is_empty() { m.id.clone() } else { m.name.clone() };
                                         let size_kb = m.bytes.len() / 1024;
                                         let conn2 = conn.clone();
                                         let cid = chat_id.clone();

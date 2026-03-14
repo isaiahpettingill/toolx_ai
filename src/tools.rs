@@ -11,6 +11,8 @@ use thiserror::Error;
 use wasmer::{Instance, Module, Store};
 use wasmer_wasix::{Pipe, WasiEnv, WasiFunctionEnv};
 
+use crate::db::WasiApp;
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ToolInvocation {
     pub tool_name: String,
@@ -76,6 +78,14 @@ impl ChatToolConfig {
             wasi_app_id: Some(app_id.to_string()),
         }
     }
+
+    pub fn is_wasi_app(&self) -> bool {
+        self.wasi_app_id.is_some()
+    }
+
+    pub fn matches_builtin_kind(&self, kind: ChatToolKind) -> bool {
+        !self.is_wasi_app() && self.kind == kind
+    }
 }
 
 pub const AVAILABLE_TOOLS: &[ChatToolKind] = &[
@@ -132,26 +142,109 @@ pub fn serialize_tool_configs(configs: &[ChatToolConfig]) -> String {
 }
 
 pub fn has_tool(tools: &[ChatToolConfig], kind: ChatToolKind) -> bool {
-    tools.iter().any(|tool| tool.kind == kind)
+    tools.iter().any(|tool| tool.matches_builtin_kind(kind))
 }
 
 pub fn has_wasi_tool(tools: &[ChatToolConfig]) -> bool {
     tools.iter().any(|tool| tool.wasi_app_id.is_some())
 }
 
-pub fn build_agent_preamble(system_prompt: &str, active_tools: &[ChatToolConfig]) -> String {
+pub fn build_agent_preamble(
+    system_prompt: &str,
+    model: &str,
+    active_tools: &[ChatToolConfig],
+    wasi_apps: &[WasiApp],
+) -> String {
     let base = if system_prompt.trim().is_empty() {
         "You are a helpful assistant.".to_string()
     } else {
         system_prompt.trim().to_string()
     };
 
+    let mut notes: Vec<String> = Vec::new();
+
+    notes.push(format!(
+        "You are the assistant running on the Ollama model `{model}`. Do not claim to be a different model family, vendor, or architecture. If asked what model you are, say `{model}`."
+    ));
+    notes.push(
+        "Do not claim you have bash, shell, terminal, OS, or general system access unless that exact capability is explicitly listed in the enabled tools below. If asked what tools you have, list only the enabled tools below.".to_string()
+    );
+
+    let mut inventory: Vec<String> = Vec::new();
+
     if has_tool(active_tools, ChatToolKind::DuckDuckGoSearch) {
-        format!(
-            "{base}\n\nWhen the user needs fresh web information, local recommendations, live availability, recent events, or facts you are not confident about, call the DuckDuckGo Search tool. Never pretend you searched if you did not use the tool.\n\nAt the end of your response, if you used any tools, briefly list what searches you performed in the format: [Searches: query1, query2, ...]",
-        )
-    } else {
+        inventory.push(
+            "- `duckduckgo_search(query)`: search the web for current results and snippets."
+                .to_string(),
+        );
+    }
+
+    if has_tool(active_tools, ChatToolKind::ReadTextFile) {
+        inventory.push(
+            "- `read_text_file(path)`: read a text file from the virtual filesystem."
+                .to_string(),
+        );
+    }
+
+    if has_tool(active_tools, ChatToolKind::WriteTextFile) {
+        inventory.push(
+            "- `write_text_file(path, content)`: write a text file to the virtual filesystem."
+                .to_string(),
+        );
+    }
+
+    for app_id in active_tools.iter().filter_map(|tool| tool.wasi_app_id.as_deref()) {
+        if let Some(app) = wasi_apps.iter().find(|app| app.id == app_id) {
+            let tool_name = WasiAppTool::normalize_tool_name(&app.name);
+            let summary = if app.description.trim().is_empty() {
+                format!("run the `{}` WASM tool", app.name)
+            } else {
+                app.description.trim().to_string()
+            };
+            inventory.push(format!(
+                "- `{tool_name}(args)`: {summary}. User-facing name: `{}`. Pass CLI arguments as one string in `args`; do not mention bash unless this tool's own help explicitly says it provides a shell.",
+                app.name
+            ));
+        }
+    }
+
+    if !inventory.is_empty() {
+        notes.push(format!(
+            "Enabled tools in this chat:\n{}",
+            inventory.join("\n")
+        ));
+        notes.push(
+            "When the user asks what tools you have, answer from that exact list with those exact names. Do not invent extra capabilities or hidden tools.".to_string()
+        );
+    }
+
+    if has_tool(active_tools, ChatToolKind::DuckDuckGoSearch) {
+        notes.push(
+            "When the task requires current web information, call `duckduckgo_search` instead of guessing. Never pretend you used a tool if you did not.".to_string()
+        );
+        notes.push(
+            "If you used DuckDuckGo Search, briefly list the searches at the end in the format: [Searches: query1, query2, ...]".to_string()
+        );
+    }
+
+    if has_wasi_tool(active_tools) {
+        notes.push(
+            "WASM-backed tools are normal callable tools. Use their exact tool names from the enabled-tools list, and pass CLI arguments in `args` without repeating the tool name.".to_string()
+        );
+    }
+
+    if has_tool(active_tools, ChatToolKind::ReadTextFile)
+        || has_tool(active_tools, ChatToolKind::WriteTextFile)
+    {
+        notes.push(
+            "If file tools are available, you can read and write files through those tools. Do not claim file access is unavailable when those tools are enabled.".to_string()
+        );
+    }
+
+    if notes.is_empty() {
         base
+    } else {
+        format!("{base}\n\n{}", notes.join("\n\n"))
     }
 }
 
@@ -411,8 +504,9 @@ impl Tool for WriteTextFileTool {
 
 // ── WASI App Tool ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct WasiAppArgs {
+    #[serde(default)]
     pub args: String,
 }
 
@@ -424,22 +518,75 @@ pub struct WasiAppError(pub String);
 pub struct WasiAppTool {
     pub name: String,
     pub description: String,
+    pub help_text: String,
     pub bytes: Vec<u8>,
     pub vfs: VfsHandle,
 }
 
 impl WasiAppTool {
-    pub fn new(name: &str, description: &str, bytes: Vec<u8>, vfs: VfsHandle) -> Self {
+    pub fn new(
+        name: &str,
+        description: &str,
+        help_text: &str,
+        bytes: Vec<u8>,
+        vfs: VfsHandle,
+    ) -> Self {
         Self {
             name: name.to_string(),
             description: description.to_string(),
+            help_text: help_text.to_string(),
             bytes,
             vfs,
         }
     }
 
-    pub fn id(&self) -> String {
-        format!("wasi_{}", self.name.replace(' ', "_").to_lowercase())
+    pub fn normalize_tool_name(name: &str) -> String {
+        let mut out = String::new();
+        let mut last_was_sep = false;
+
+        for ch in name.chars() {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch.to_ascii_lowercase());
+                last_was_sep = false;
+            } else if !last_was_sep && !out.is_empty() {
+                out.push('_');
+                last_was_sep = true;
+            }
+        }
+
+        let out = out.trim_matches('_').to_string();
+        if out.is_empty() {
+            return "tool".to_string();
+        }
+
+        if out.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+            format!("tool_{out}")
+        } else {
+            out
+        }
+    }
+
+    pub fn tool_name(&self) -> String {
+        Self::normalize_tool_name(&self.name)
+    }
+
+    fn tool_description(&self) -> String {
+        let summary = if self.description.trim().is_empty() {
+            format!("Run the `{}` command line tool.", self.name)
+        } else {
+            self.description.trim().to_string()
+        };
+
+        let usage = format!(
+            "Call this tool by passing the command line arguments as a single shell-style string in `args`. Do not repeat the tool name. Use an empty string when no arguments are needed."
+        );
+
+        let help = self.help_text.trim();
+        if help.is_empty() || help == "No help available" {
+            format!("{summary}\n\n{usage}")
+        } else {
+            format!("{summary}\n\n{usage}\n\nCLI help:\n{help}")
+        }
     }
 }
 
@@ -450,19 +597,22 @@ impl Tool for WasiAppTool {
     type Args = WasiAppArgs;
     type Output = String;
 
+    fn name(&self) -> String {
+        self.tool_name()
+    }
+
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
-            name: self.id(),
-            description: self.description.clone(),
+            name: self.tool_name(),
+            description: self.tool_description(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "args": {
                         "type": "string",
-                        "description": "Command line arguments to pass to the WASI application"
+                        "description": format!("Arguments for `{}` as one shell-style string, excluding the tool name itself. Example: `--help` or `input.txt --format json`.", self.name)
                     }
-                },
-                "required": ["args"]
+                }
             }),
         }
     }

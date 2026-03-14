@@ -5,7 +5,7 @@ use crate::tools::{ChatToolConfig, ChatToolKind, AVAILABLE_TOOLS};
 
 #[component]
 pub fn ToolPickerModal(
-    active_tools: Vec<ChatToolConfig>,
+    active_tools: Signal<Vec<ChatToolConfig>>,
     wasi_apps: Signal<Vec<WasiApp>>,
     on_toggle_tool: EventHandler<ChatToolKind>,
     on_toggle_wasi: EventHandler<String>,
@@ -43,18 +43,22 @@ pub fn ToolPickerModal(
 
             div { id: "tool-picker-body",
                 // Built-in tools
-                for tool in AVAILABLE_TOOLS.iter().copied() {
+                for (idx, tool) in AVAILABLE_TOOLS.iter().copied().enumerate() {
                     {
                         // Skip showing Read/Write file tools - they're enabled automatically when WASI tools are used
                         if tool == ChatToolKind::ReadTextFile || tool == ChatToolKind::WriteTextFile {
-                            return rsx! {};
-                        }
-                        let enabled = active_tools.iter().any(|active| active.kind == tool);
-                        rsx! {
-                            button {
-                                class: if enabled { "tool-card tool-card--active" } else { "tool-card" },
-                                key: "{tool.id()}",
-                                onclick: move |_| on_toggle_tool.call(tool),
+                            rsx! {}
+                        } else {
+                            let enabled = active_tools
+                                .read()
+                                .iter()
+                                .any(|active| active.matches_builtin_kind(tool));
+                            let key = format!("tool-{}", idx);
+                            rsx! {
+                                button {
+                                    class: if enabled { "tool-card tool-card--active" } else { "tool-card" },
+                                    key: "{key}",
+                                    onclick: move |_| on_toggle_tool.call(tool),
 
                                 div { class: "tool-card-icon",
                                     match tool.icon() {
@@ -84,6 +88,7 @@ pub fn ToolPickerModal(
                                     if enabled { "On" } else { "Off" }
                                 }
                             }
+                            }
                         }
                     }
                 }
@@ -91,15 +96,17 @@ pub fn ToolPickerModal(
                 // WASI Apps section
                 if has_wasi {
                     div { class: "tool-picker-section-header", "WASI Apps" }
-                    for app in wasi_apps.read().iter() {
+                    for (idx, app) in wasi_apps.read().iter().enumerate() {
                         {
                             let app_id = app.id.clone();
-                            let enabled = active_tools.iter().any(|t| t.wasi_app_id.as_ref() == Some(&app.id));
+                            let app_id3 = app.id.clone();
+                            let enabled = active_tools.read().iter().any(|t| t.wasi_app_id.as_ref() == Some(&app_id));
+                            let key = format!("wasi-{}", idx);
                             rsx! {
                                 button {
                                     class: if enabled { "tool-card tool-card--active" } else { "tool-card" },
-                                    key: "wasi-{app.id}",
-                                    onclick: move |_| on_toggle_wasi.call(app_id.clone()),
+                                    key: "{key}",
+                                    onclick: move |_| on_toggle_wasi.call(app_id3.clone()),
 
                                     div { class: "tool-card-icon",
                                         svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",

@@ -1,7 +1,8 @@
 use dioxus::prelude::*;
 
-use crate::db::{self, WasmModel};
+use crate::db::{self, WasiApp, WasmModel};
 use crate::providers;
+use crate::tools;
 
 const SETTING_OLLAMA_URL: &str = "ollama_base_url";
 
@@ -12,6 +13,7 @@ pub fn ProviderConfigPanel(
     conn: Signal<rusqlite::Connection>,
     mut ollama_base_url: Signal<String>,
     mut wasm_models: Signal<Vec<WasmModel>>,
+    mut wasi_apps: Signal<Vec<WasiApp>>,
     on_close: EventHandler<()>,
 ) -> Element {
     let mut active_tab: Signal<&'static str> = use_signal(|| "ollama");
@@ -82,10 +84,10 @@ pub fn ProviderConfigPanel(
             div { id: "config-panel-body",
                 if active_tab() == "ollama" {
                     OllamaSection { conn, ollama_base_url, on_close }
-                } else if active_tab() == "wasi" {
-                    WasiSection { conn, wasm_models }
+                } else if active_tab() == "wasi_apps" {
+                    WasiAppsSection { conn, wasi_apps }
                 } else {
-                    WasiAppsSection { conn }
+                    WasiSection { conn, wasm_models }
                 }
             }
         }
@@ -199,150 +201,347 @@ fn WasiSection(
     let mut uploading = use_signal(|| false);
 
     rsx! {
-            div { class: "config-section",
-                div { class: "config-section-header",
-                    div { class: "config-section-icon",
-                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
-                            fill: "none", stroke: "currentColor", stroke_width: "2",
-                            width: "16", height: "16",
-                            rect { x: "9", y: "9", width: "6", height: "6" }
-                            path { d: "M9 3H7a2 2 0 0 0-2 2v2M15 3h2a2 2 0 0 1 2 2v2M9 21H7a2 2 0 0 1-2-2v-2M15 21h2a2 2 0 0 0 2-2v-2M3 9v2M3 13v2M21 9v2M21 13v2" }
-                        }
-                    }
-                    div {
-                        div { class: "config-section-name", "WASI Modules" }
-                        div { class: "config-section-desc",
-                            "Upload "
-                            code { "wasm32-wasip1" }
-                            " binaries. Chat with them via stdin/stdout."
-                        }
+        div { class: "config-section",
+            div { class: "config-section-header",
+                div { class: "config-section-icon",
+                    svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                        width: "16", height: "16",
+                        rect { x: "9", y: "9", width: "6", height: "6" }
+                        path { d: "M9 3H7a2 2 0 0 0-2 2v2M15 3h2a2 2 0 0 1 2 2v2M9 21H7a2 2 0 0 1-2-2v-2M15 21h2a2 2 0 0 0 2-2v-2M3 9v2M3 13v2M21 9v2M21 13v2" }
                     }
                 }
-
-                // Upload area
-                div { class: "wasi-upload-area",
-                    label { class: "wasi-upload-label", r#for: "wasm-file-input",
-                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
-                            fill: "none", stroke: "currentColor", stroke_width: "2",
-                            width: "20", height: "20",
-                            path { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }
-                            polyline { points: "17 8 12 3 7 8" }
-                            line { x1: "12", y1: "3", x2: "12", y2: "15" }
-                        }
-                        if uploading() {
-                            span { "Uploading…" }
-                        } else {
-                            span { "Click to upload a " }
-                            code { ".wasm" }
-                            span { " module" }
-                        }
+                div {
+                    div { class: "config-section-name", "WASI Modules" }
+                    div { class: "config-section-desc",
+                        "Upload "
+                        code { "wasm32-wasip1" }
+                        " binaries. Chat with them via stdin/stdout."
                     }
-                    input {
-                        id: "wasm-file-input",
-                        r#type: "file",
-                        accept: ".wasm",
-                        style: "display:none",
-                        onchange: move |e| {
-                            upload_error.set(None);
-                            uploading.set(true);
-                            let file_list = e.files();
-                            spawn(async move {
-                                if let Some(file) = file_list.first() {
-                                    let name = file.name();
-                                    match file.read_bytes().await {
-                                        Ok(bytes) => {
-                                            match db::add_wasm_model(&conn.read(), &name, &bytes) {
-                                                Ok(model) => {
-                                                    wasm_models.write().push(model);
-                                                }
-                                                Err(e) => {
-                                                    upload_error.set(Some(format!("DB error: {e}")));
-                                                }
+                }
+            }
+
+            // Upload area
+            div { class: "wasi-upload-area",
+                label { class: "wasi-upload-label", r#for: "wasm-file-input",
+                    svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                        width: "20", height: "20",
+                        path { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }
+                        polyline { points: "17 8 12 3 7 8" }
+                        line { x1: "12", y1: "3", x2: "12", y2: "15" }
+                    }
+                    if uploading() {
+                        span { "Uploading…" }
+                    } else {
+                        span { "Click to upload a " }
+                        code { ".wasm" }
+                        span { " module" }
+                    }
+                }
+                input {
+                    id: "wasm-file-input",
+                    r#type: "file",
+                    accept: ".wasm",
+                    style: "display:none",
+                    onchange: move |e| {
+                        upload_error.set(None);
+                        uploading.set(true);
+                        let file_list = e.files();
+                        spawn(async move {
+                            if let Some(file) = file_list.first() {
+                                let name = file.name();
+                                match file.read_bytes().await {
+                                    Ok(bytes) => {
+                                        match db::add_wasm_model(&conn.read(), &name, &bytes) {
+                                            Ok(model) => {
+                                                wasm_models.write().push(model);
+                                            }
+                                            Err(e) => {
+                                                upload_error.set(Some(format!("DB error: {e}")));
                                             }
                                         }
-                                        Err(e) => {
-                                            upload_error.set(Some(format!("Failed to read file: {e}")));
+                                    }
+                                    Err(e) => {
+                                        upload_error.set(Some(format!("Failed to read file: {e}")));
+                                    }
+                                }
+                            }
+                            uploading.set(false);
+                        });
+                    },
+                }
+            }
+
+            if let Some(ref err) = *upload_error.read() {
+                div { class: "config-test-err", "{err}" }
+            }
+
+            // Module list
+            if wasm_models.read().is_empty() {
+                div { class: "wasi-empty",
+                    "No WASI modules uploaded yet."
+                }
+            } else {
+                div { class: "wasi-module-list",
+                    for model in wasm_models.read().clone().into_iter() {
+                        {
+                            let model_id = model.id.clone();
+                            let model_name = model.name.clone();
+                            let size_kb = model.bytes.len() / 1024;
+                            rsx! {
+                                div { class: "wasi-module-row", key: "{model_id}",
+                                    div { class: "wasi-module-icon",
+                                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                                            fill: "none", stroke: "currentColor", stroke_width: "2",
+                                            width: "16", height: "16",
+                                            path { d: "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" }
+                                            polyline { points: "13 2 13 9 20 9" }
+                                        }
+                                    }
+                                    div { class: "wasi-module-info",
+                                        div { class: "wasi-module-name", "{model_name}" }
+                                        div { class: "wasi-module-meta",
+                                            span { class: "wasi-badge", "WASI" }
+                                            span { class: "wasi-module-size", "{size_kb} KB" }
+                                        }
+                                    }
+                                    button {
+                                        class: "icon-btn icon-btn--danger",
+                                        title: "Remove module",
+                                        onclick: move |_| {
+                                            db::delete_wasm_model(&conn.read(), &model_id).ok();
+                                            wasm_models.write().retain(|m| m.id != model_id);
+                                        },
+                                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                                            fill: "none", stroke: "currentColor", stroke_width: "2",
+                                            width: "13", height: "13",
+                                            polyline { points: "3 6 5 6 21 6" }
+                                            path { d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" }
+                                            path { d: "M10 11v6" }
+                                            path { d: "M14 11v6" }
+                                            path { d: "M9 6V4h6v2" }
                                         }
                                     }
                                 }
-                                uploading.set(false);
-                            });
-                        },
+                            }
+                        }
                     }
                 }
+            }
+        }
+    }
+}
 
-                if let Some(ref err) = *upload_error.read() {
-                    div { class: "config-test-err", "{err}" }
-                }
+// ── WASI Apps section ─────────────────────────────────────────────────────────
 
-                // Module list
-                if wasm_models.read().is_empty() {
-                    div { class: "wasi-empty",
-                        "No WASI modules uploaded yet."
+#[component]
+fn WasiAppsSection(
+    conn: Signal<rusqlite::Connection>,
+    mut wasi_apps: Signal<Vec<WasiApp>>,
+) -> Element {
+    let mut uploading = use_signal(|| false);
+    let mut upload_error = use_signal(|| Option::<String>::None);
+    let mut editing_id: Signal<Option<String>> = use_signal(|| None);
+    let mut edit_buf = use_signal(String::new);
+
+    rsx! {
+        div { class: "config-section",
+            div { class: "config-section-header",
+                div { class: "config-section-icon",
+                    svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                        width: "16", height: "16",
+                        polyline { points: "4 17 10 11 4 5" }
+                        line { x1: "12", y1: "19", x2: "20", y2: "19" }
                     }
-                } else {
-                    div { class: "wasi-module-list",
-                        for model in wasm_models.read().clone().into_iter() {
-                            {
-                                let model_id = model.id.clone();
-                                let model_name = model.name.clone();
-                                let size_kb = model.bytes.len() / 1024;
-                                rsx! {
-                                    div { class: "wasi-module-row", key: "{model_id}",
+                }
+                div {
+                    div { class: "config-section-name", "WASI CLI Apps" }
+                    div { class: "config-section-desc",
+                        "Upload "
+                        code { "wasm32-wasip1" }
+                        " CLI binaries. Run with arguments, auto-generate help."
+                    }
+                }
+            }
+
+            // Upload area
+            div { class: "wasi-upload-area",
+                label { class: "wasi-upload-label", r#for: "wasi-app-file-input",
+                    svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                        width: "20", height: "20",
+                        path { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }
+                        polyline { points: "17 8 12 3 7 8" }
+                        line { x1: "12", y1: "3", x2: "12", y2: "15" }
+                    }
+                    if uploading() {
+                        span { "Uploading…" }
+                    } else {
+                        span { "Click to upload a " }
+                        code { ".wasm" }
+                        span { " CLI app" }
+                    }
+                }
+                input {
+                    id: "wasi-app-file-input",
+                    r#type: "file",
+                    accept: ".wasm",
+                    style: "display:none",
+                    onchange: move |e| {
+                        upload_error.set(None);
+                        uploading.set(true);
+                        let file_list = e.files();
+                        let conn = conn.clone();
+                        spawn(async move {
+                            if let Some(file) = file_list.first() {
+                                let name = file.name();
+                                match file.read_bytes().await {
+                                    Ok(bytes) => {
+                                        let help_text = tools::generate_help_text(&bytes, &name).await;
+                                        let description = if help_text.len() > 100 {
+                                            format!("{}...", &help_text[..100])
+                                        } else {
+                                            help_text.clone()
+                                        };
+
+                                        match db::add_wasi_app(&conn.read(), &name, &description, &help_text, &bytes) {
+                                            Ok(app) => {
+                                                wasi_apps.write().push(app);
+                                            }
+                                            Err(e) => {
+                                                upload_error.set(Some(format!("DB error: {e}")));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        upload_error.set(Some(format!("Failed to read file: {e}")));
+                                    }
+                                }
+                            }
+                            uploading.set(false);
+                        });
+                    },
+                }
+            }
+
+            if let Some(ref err) = *upload_error.read() {
+                div { class: "config-test-err", "{err}" }
+            }
+
+            // Apps list
+            if wasi_apps.read().is_empty() {
+                div { class: "wasi-empty",
+                    "No WASI apps uploaded yet."
+                }
+            } else {
+                div { class: "wasi-module-list",
+                    for (idx, app) in wasi_apps.read().clone().into_iter().enumerate() {
+                        {
+                            let app_id = app.id.clone();
+                            let app_id_for_edit = app.id.clone();
+                            let app_id_for_delete = app.id.clone();
+                            let app_name = app.name.clone();
+                            let app_desc = app.description.clone();
+                            let size_kb = app.bytes.len() / 1024;
+                            let is_editing = editing_id.read().as_deref() == Some(&app_id);
+                            rsx! {
+                                div { class: "wasi-module-row", key: "wasi-app-{idx}-{app_id}",
+                                    if is_editing {
+                                        input {
+                                            class: "config-input",
+                                            value: "{edit_buf}",
+                                            autofocus: true,
+                                            oninput: move |e| edit_buf.set(e.value()),
+                                            onkeydown: {
+                                                let conn = conn.clone();
+                                                let app_id_inner = app_id.clone();
+                                                move |e: KeyboardEvent| {
+                                                    if e.key() == Key::Enter {
+                                                        let new_desc = edit_buf.read().clone();
+                                                        db::update_wasi_app(&conn.read(), &app_id_inner, &new_desc).ok();
+                                                        if let Some(app) = wasi_apps.write().iter_mut().find(|a| a.id == app_id_inner) {
+                                                            app.description = new_desc;
+                                                        }
+                                                        editing_id.set(None);
+                                                    } else if e.key() == Key::Escape {
+                                                        editing_id.set(None);
+                                                    }
+                                                }
+                                            },
+                                            onblur: {
+                                                let conn = conn.clone();
+                                                let app_id_inner = app_id.clone();
+                                                move |_| {
+                                                    let new_desc = edit_buf.read().clone();
+                                                    db::update_wasi_app(&conn.read(), &app_id_inner, &new_desc).ok();
+                                                    if let Some(app) = wasi_apps.write().iter_mut().find(|a| a.id == app_id_inner) {
+                                                        app.description = new_desc;
+                                                    }
+                                                    editing_id.set(None);
+                                                }
+                                            },
+                                        }
+                                    } else {
                                         div { class: "wasi-module-icon",
                                             svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
                                                 fill: "none", stroke: "currentColor", stroke_width: "2",
                                                 width: "16", height: "16",
-                                                path { d: "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" }
-                                                polyline { points: "13 2 13 9 20 9" }
+                                                polyline { points: "4 17 10 11 4 5" }
+                                                line { x1: "12", y1: "19", x2: "20", y2: "19" }
                                             }
                                         }
                                         div { class: "wasi-module-info",
-                                            div { class: "wasi-module-name", "{model_name}" }
+                                            div { class: "wasi-module-name", "{app_name}" }
                                             div { class: "wasi-module-meta",
-                                                span { class: "wasi-badge", "WASI" }
+                                                span { class: "wasi-badge", "CLI" }
                                                 span { class: "wasi-module-size", "{size_kb} KB" }
+                                            }
+                                            if !app_desc.is_empty() {
+                                                div { class: "wasi-module-desc", "{app_desc}" }
                                             }
                                         }
                                         button {
-                                            class: "icon-btn icon-btn--danger",
-                                            title: "Remove module",
+                                            class: "icon-btn",
+                                            title: "Edit description",
                                             onclick: move |_| {
-                                                db::delete_wasm_model(&conn.read(), &model_id).ok();
-                                                wasm_models.write().retain(|m| m.id != model_id);
+                                                edit_buf.set(app_desc.clone());
+                                                editing_id.set(Some(app_id_for_edit.clone()));
                                             },
                                             svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
                                                 fill: "none", stroke: "currentColor", stroke_width: "2",
                                                 width: "13", height: "13",
-                                                polyline { points: "3 6 5 6 21 6" }
-                                                path { d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" }
-                                                path { d: "M10 11v6" }
-                                                path { d: "M14 11v6" }
-                                                path { d: "M9 6V4h6v2" }
-                    }
-                }
-            }
-        }
-    }
-
-    #[component]
-    fn WasiAppsSection(
-        conn: Signal<rusqlite::Connection>,
-    ) -> Element {
-        rsx! {
-            div { class: "config-section",
-                div { class: "config-section-header",
-                    div { class: "config-section-name", "WASI CLI Apps" }
-                }
-                div { "No WASI apps configured." }
-            }
-        }
-    }
+                                                path { d: "M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" }
+                                                path { d: "M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" }
+                                            }
+                                        }
+                                    }
+                                    button {
+                                        class: "icon-btn icon-btn--danger",
+                                        title: "Remove app",
+                                        onclick: move |_| {
+                                            db::delete_wasi_app(&conn.read(), &app_id_for_delete).ok();
+                                            wasi_apps.write().retain(|a| a.id != app_id_for_delete);
+                                        },
+                                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                                            fill: "none", stroke: "currentColor", stroke_width: "2",
+                                            width: "13", height: "13",
+                                            polyline { points: "3 6 5 6 21 6" }
+                                            path { d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" }
+                                            path { d: "M10 11v6" }
+                                            path { d: "M14 11v6" }
+                                            path { d: "M9 6V4h6v2" }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+    }
 }
 
 // ── Color picker ──────────────────────────────────────────────────────────────

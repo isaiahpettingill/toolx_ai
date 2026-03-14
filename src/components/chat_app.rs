@@ -147,9 +147,7 @@ pub fn ChatApp() -> Element {
             {
                 next_tools.remove(index);
             } else {
-                let mut config = ChatToolConfig::new(ChatToolKind::DuckDuckGoSearch);
-                config.wasi_app_id = Some(app_id);
-                next_tools.push(config);
+                next_tools.push(ChatToolConfig::new_wasi(&app_id));
             }
 
             let tools_json = serialize_tool_configs(&next_tools);
@@ -400,13 +398,14 @@ pub fn ChatApp() -> Element {
                         conn,
                         ollama_base_url,
                         wasm_models,
+                        wasi_apps,
                         on_close: move |_| provider_config_open.set(false),
                     }
                 }
 
                 if tool_picker_open() {
                     ToolPickerModal {
-                        active_tools: current_tools(),
+                        active_tools: current_tools,
                         wasi_apps: wasi_apps,
                         on_toggle_tool: toggle_tool,
                         on_toggle_wasi: toggle_wasi,
