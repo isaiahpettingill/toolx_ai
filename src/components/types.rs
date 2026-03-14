@@ -1,4 +1,4 @@
-use crate::db::DbMessage;
+use crate::db::{DbMessage, MessageCitation};
 use crate::markdown;
 use crate::tools::ToolInvocation;
 
@@ -49,6 +49,7 @@ pub struct UiMessage {
     pub tool_label: Option<String>,
     pub thinking: Option<String>,
     pub tool_invocations: Vec<ToolInvocation>,
+    pub citations: Vec<MessageCitation>,
 }
 
 impl UiMessage {
@@ -67,6 +68,7 @@ impl UiMessage {
             tool_label: None,
             thinking: None,
             tool_invocations: Vec::new(),
+            citations: msg.citations.clone(),
         }
     }
 
@@ -80,6 +82,7 @@ impl UiMessage {
             tool_label: None,
             thinking: None,
             tool_invocations: Vec::new(),
+            citations: Vec::new(),
         }
     }
 }

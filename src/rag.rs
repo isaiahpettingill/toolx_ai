@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-use crate::db::{self, ChatFile, KnowledgeBaseFile, RagChunk};
+use crate::db::{self, ChatFile, KnowledgeBaseFile, MessageCitation, RagChunk};
 use crate::providers::ProviderError;
 
 pub const SHORT_TEXT_INLINE_LIMIT: usize = 4_000;
@@ -359,6 +359,30 @@ pub fn format_retrieved_context(chunks: &[RetrievedChunk]) -> String {
         ));
     }
     lines.join("\n\n")
+}
+
+pub fn to_message_citations(chunks: &[RetrievedChunk]) -> Vec<MessageCitation> {
+    chunks
+        .iter()
+        .map(|chunk| MessageCitation {
+            source_label: chunk.source_label.clone(),
+            path: chunk.path.clone(),
+            excerpt: citation_excerpt(&chunk.content),
+            score: chunk.score,
+        })
+        .collect()
+}
+
+fn citation_excerpt(content: &str) -> String {
+    let trimmed = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut excerpt = String::new();
+    for ch in trimmed.chars().take(220) {
+        excerpt.push(ch);
+    }
+    if trimmed.chars().count() > 220 {
+        excerpt.push_str("...");
+    }
+    excerpt
 }
 
 fn parse_term_freq(json: &str) -> HashMap<String, u32> {

@@ -15,6 +15,7 @@ use rig::tool::ToolDyn;
 use tokio::sync::mpsc;
 
 use super::{ChatAttachment, ChatKnowledgeBaseRef, Message, ProviderError, RemoteModel};
+use crate::db::MessageCitation;
 use crate::db::{self, WasiApp};
 use crate::tools::{
     self, ChatToolConfig, ChatToolKind, DuckDuckGoSearchTool, ReadTextFileTool, ToolInvocation,
@@ -118,6 +119,7 @@ pub struct StreamChunk {
     pub delta: String,
     pub final_content: Option<String>,
     pub tool_invocations: Option<Vec<ToolInvocation>>,
+    pub citations: Option<Vec<MessageCitation>>,
 }
 
 pub async fn chat(
@@ -373,6 +375,7 @@ async fn run_chat_stream(
                     delta: text.text,
                     final_content: None,
                     tool_invocations: None,
+                    citations: None,
                 }))
                 .await
                 .ok();
@@ -395,6 +398,7 @@ async fn run_chat_stream(
         delta: String::new(),
         final_content: Some(clean_content),
         tool_invocations: Some(tool_invocations),
+        citations: None,
     }))
     .await
     .ok();

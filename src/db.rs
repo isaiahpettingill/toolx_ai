@@ -27,11 +27,20 @@ pub struct ChatSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MessageCitation {
+    pub source_label: String,
+    pub path: String,
+    pub excerpt: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DbMessage {
     pub id: String,
     pub chat_id: String,
     pub role: String,
     pub content: String,
+    pub citations: Vec<MessageCitation>,
     pub created_at: String,
 }
 
@@ -305,6 +314,7 @@ fn init_schema(conn: Connection) -> Result<Connection> {
             chat_id     TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
             role        TEXT NOT NULL,
             content     TEXT NOT NULL,
+            citations_json TEXT NOT NULL DEFAULT '[]',
             created_at  TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS settings (
@@ -387,6 +397,10 @@ fn init_schema(conn: Connection) -> Result<Connection> {
         .ok();
     conn.execute_batch("ALTER TABLE chats ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''; ")
         .ok();
+    conn.execute_batch(
+        "ALTER TABLE messages ADD COLUMN citations_json TEXT NOT NULL DEFAULT '[]';",
+    )
+    .ok();
     conn.execute_batch("ALTER TABLE wasm_models ADD COLUMN file_path TEXT NOT NULL DEFAULT ''; ")
         .ok();
     conn.execute_batch("ALTER TABLE wasm_models ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0; ")
@@ -495,7 +509,7 @@ pub fn delete_chat(conn: &Connection, id: &str) -> Result<()> {
 
 pub fn get_messages(conn: &Connection, chat_id: &str) -> Result<Vec<DbMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, chat_id, role, content, created_at FROM messages WHERE chat_id=?1 ORDER BY created_at ASC",
+        "SELECT id, chat_id, role, content, citations_json, created_at FROM messages WHERE chat_id=?1 ORDER BY created_at ASC",
     )?;
     let rows = stmt.query_map(params![chat_id], |row| {
         Ok(DbMessage {
@@ -503,7 +517,8 @@ pub fn get_messages(conn: &Connection, chat_id: &str) -> Result<Vec<DbMessage>> 
             chat_id: row.get(1)?,
             role: row.get(2)?,
             content: row.get(3)?,
-            created_at: row.get(4)?,
+            citations: parse_message_citations(&row.get::<_, String>(4)?),
+            created_at: row.get(5)?,
         })
     })?;
     rows.collect()
@@ -515,11 +530,22 @@ pub fn add_message(
     role: &str,
     content: &str,
 ) -> Result<DbMessage> {
+    add_message_with_citations(conn, chat_id, role, content, &[])
+}
+
+pub fn add_message_with_citations(
+    conn: &Connection,
+    chat_id: &str,
+    role: &str,
+    content: &str,
+    citations: &[MessageCitation],
+) -> Result<DbMessage> {
     let now = Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
+    let citations_json = serde_json::to_string(citations).unwrap_or_else(|_| "[]".to_string());
     conn.execute(
-        "INSERT INTO messages (id, chat_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, chat_id, role, content, now],
+        "INSERT INTO messages (id, chat_id, role, content, citations_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, chat_id, role, content, citations_json, now],
     )?;
     conn.execute(
         "UPDATE chats SET updated_at=?1 WHERE id=?2",
@@ -530,8 +556,13 @@ pub fn add_message(
         chat_id: chat_id.to_string(),
         role: role.to_string(),
         content: content.to_string(),
+        citations: citations.to_vec(),
         created_at: now,
     })
+}
+
+fn parse_message_citations(json: &str) -> Vec<MessageCitation> {
+    serde_json::from_str(json).unwrap_or_default()
 }
 
 pub fn update_chat_model(conn: &Connection, chat_id: &str, model: &str) -> Result<()> {
@@ -920,6 +951,40 @@ pub fn list_chat_files(conn: &Connection, chat_id: &str) -> Result<Vec<ChatFile>
     rows.collect()
 }
 
+pub fn get_chat_file(conn: &Connection, file_id: &str) -> Result<Option<ChatFile>> {
+    conn.query_row(
+        "SELECT id, chat_id, path, display_name, file_path, mime_type, byte_size, is_text, inline_context, created_at
+         FROM chat_files WHERE id=?1",
+        params![file_id],
+        |row| {
+            Ok(ChatFile {
+                id: row.get(0)?,
+                chat_id: row.get(1)?,
+                path: row.get(2)?,
+                display_name: row.get(3)?,
+                file_path: row.get(4)?,
+                mime_type: row.get(5)?,
+                byte_size: row.get::<_, i64>(6)? as u64,
+                is_text: row.get::<_, i64>(7)? != 0,
+                inline_context: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn delete_chat_file(conn: &Connection, file_id: &str) -> Result<()> {
+    if let Some(file) = get_chat_file(conn, file_id)? {
+        remove_storage_file(&file.file_path);
+        let vfs_path = chat_vfs_root(&file.chat_id).join(file.path.trim_start_matches('/'));
+        let _ = fs::remove_file(vfs_path);
+        conn.execute("DELETE FROM rag_chunks WHERE file_id=?1", params![file_id])?;
+        conn.execute("DELETE FROM chat_files WHERE id=?1", params![file_id])?;
+    }
+    Ok(())
+}
+
 pub fn list_chat_inline_contexts(conn: &Connection, chat_id: &str) -> Result<Vec<ChatFile>> {
     Ok(list_chat_files(conn, chat_id)?
         .into_iter()
@@ -1059,6 +1124,43 @@ pub fn list_knowledge_base_files(
         })
     })?;
     rows.collect()
+}
+
+pub fn get_knowledge_base_file(
+    conn: &Connection,
+    file_id: &str,
+) -> Result<Option<KnowledgeBaseFile>> {
+    conn.query_row(
+        "SELECT id, knowledge_base_id, path, display_name, file_path, mime_type, byte_size, is_text, created_at
+         FROM knowledge_base_files WHERE id=?1",
+        params![file_id],
+        |row| {
+            Ok(KnowledgeBaseFile {
+                id: row.get(0)?,
+                knowledge_base_id: row.get(1)?,
+                path: row.get(2)?,
+                display_name: row.get(3)?,
+                file_path: row.get(4)?,
+                mime_type: row.get(5)?,
+                byte_size: row.get::<_, i64>(6)? as u64,
+                is_text: row.get::<_, i64>(7)? != 0,
+                created_at: row.get(8)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn delete_knowledge_base_file(conn: &Connection, file_id: &str) -> Result<()> {
+    if let Some(file) = get_knowledge_base_file(conn, file_id)? {
+        remove_storage_file(&file.file_path);
+        conn.execute("DELETE FROM rag_chunks WHERE file_id=?1", params![file_id])?;
+        conn.execute(
+            "DELETE FROM knowledge_base_files WHERE id=?1",
+            params![file_id],
+        )?;
+    }
+    Ok(())
 }
 
 pub fn attach_knowledge_base_to_chat(

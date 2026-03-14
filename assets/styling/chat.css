@@ -4,18 +4,18 @@
 :root {
     /* --accent is set via inline style on #app-shell */
     --accent-hover: #4c6ef5;
-    --bg:        #0d0f14;
-    --bg-surface: #13161f;
-    --bg-raised:  #1a1d28;
-    --bg-input:   #1e2130;
-    --border:     #252836;
-    --border-light: #2e3245;
-    --text:       #e2e4ef;
-    --text-muted: #8b90a8;
-    --text-dim:   #4e5268;
-    --radius-sm:  6px;
-    --radius-md:  10px;
-    --radius-lg:  16px;
+    --bg:        #101216;
+    --bg-surface: #171a20;
+    --bg-raised:  #1c2028;
+    --bg-input:   #141820;
+    --border:     #2b313c;
+    --border-light: #3a4350;
+    --text:       #e7e9ee;
+    --text-muted: #9aa3b1;
+    --text-dim:   #657082;
+    --radius-sm:  3px;
+    --radius-md:  6px;
+    --radius-lg:  10px;
     --sidebar-w:  256px;
 }
 
@@ -23,7 +23,7 @@ html, body {
     height: 100%;
     background: var(--bg);
     color: var(--text);
-    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-family: 'Segoe UI', 'SF Pro Text', -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 14px;
     line-height: 1.5;
     overflow: hidden;
@@ -200,14 +200,17 @@ html, body {
     align-items: center;
     gap: 6px;
     padding: 8px 10px;
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     cursor: pointer;
     position: relative;
     min-height: 36px;
     transition: background 0.12s;
 }
 .chat-row:hover { background: var(--bg-raised); }
-.chat-row--active { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.chat-row--active {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    box-shadow: inset 2px 0 0 var(--accent);
+}
 .chat-row--active .chat-row-title { color: var(--text); }
 
 .chat-row-title {
@@ -334,7 +337,7 @@ html, body {
     gap: 6px;
     background: var(--bg-raised);
     border: 1px solid var(--border-light);
-    border-radius: var(--radius-md);
+    border-radius: 0;
     color: var(--text);
     font-size: 0.85rem;
     font-weight: 500;
@@ -351,8 +354,8 @@ html, body {
     min-width: 220px;
     background: var(--bg-raised);
     border: 1px solid var(--border-light);
-    border-radius: var(--radius-md);
-    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    border-radius: 0;
+    box-shadow: 0 12px 30px rgba(0,0,0,0.35);
     z-index: 100;
     overflow: hidden;
 }
@@ -415,7 +418,7 @@ html, body {
 .msg-bubble {
     max-width: 72%;
     padding: 10px 14px;
-    border-radius: var(--radius-lg);
+    border-radius: 0;
     font-size: 0.92rem;
     line-height: 1.6;
     word-break: break-word;
@@ -424,7 +427,7 @@ html, body {
 .msg-bubble--user {
     background: var(--accent);
     color: #fff;
-    border-bottom-right-radius: 4px;
+    border-left: 1px solid color-mix(in srgb, white 22%, transparent);
     white-space: pre-wrap;
     user-select: text;
 }
@@ -433,7 +436,7 @@ html, body {
     background: var(--bg-raised);
     color: var(--text);
     border: 1px solid var(--border);
-    border-bottom-left-radius: 4px;
+    border-left: 2px solid color-mix(in srgb, var(--accent) 28%, var(--border));
     max-width: 90%;
     user-select: text;
 }
@@ -490,7 +493,7 @@ html, body {
 /* ── Code blocks ────────────────────────────────────────────────────────── */
 .code-block {
     margin: 0.6em 0;
-    border-radius: var(--radius-md);
+    border-radius: 0;
     overflow: hidden;
     border: 1px solid var(--border);
     font-size: 0.83rem;
@@ -550,7 +553,7 @@ html, body {
     padding: 3px 8px;
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: 0;
     color: var(--text-dim);
     cursor: pointer;
     transition: background 0.12s, color 0.12s;
@@ -580,7 +583,7 @@ html, body {
     padding: 7px 12px;
     background: var(--bg-raised);
     border: 1px solid var(--border-light);
-    border-radius: 999px;
+    border-radius: 0;
     color: var(--text-muted);
     font-size: 0.82rem;
     cursor: pointer;
@@ -613,7 +616,7 @@ html, body {
 #chat-embed-select {
     min-height: 32px;
     padding: 6px 12px;
-    border-radius: 999px;
+    border-radius: 0;
     border: 1px solid var(--border-light);
     background: var(--bg-raised);
     color: var(--text-muted);
@@ -640,14 +643,51 @@ html, body {
 .chat-file-chip {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    min-height: 30px;
-    padding: 5px 10px;
-    border-radius: 999px;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 42px;
+    min-width: min(100%, 320px);
+    padding: 8px 10px;
+    border-radius: 0;
     border: 1px solid var(--border);
-    background: rgba(255,255,255,0.03);
+    background: var(--bg-raised);
     color: var(--text-muted);
     font-size: 0.76rem;
+}
+
+.chat-file-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.chat-file-name-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.chat-file-name {
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
+.chat-file-details {
+    color: var(--text-dim);
+    font-size: 0.71rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-file-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
 }
 
 .chat-file-chip--inline {
@@ -674,7 +714,7 @@ html, body {
     align-items: center;
     min-height: 28px;
     padding: 5px 10px;
-    border-radius: 999px;
+    border-radius: 0;
     font-size: 0.76rem;
 }
 
@@ -696,7 +736,7 @@ html, body {
     gap: 8px;
     background: var(--bg-input);
     border: 1px solid var(--border-light);
-    border-radius: var(--radius-lg);
+    border-radius: 0;
     padding: 6px 8px 6px 16px;
     transition: border-color 0.2s;
     max-width: 820px;
@@ -726,7 +766,7 @@ html, body {
 #chat-send-btn {
     width: 34px;
     height: 34px;
-    border-radius: 9px;
+    border-radius: 0;
     border: none;
     background: var(--accent);
     color: #fff;
@@ -840,7 +880,7 @@ html, body {
 #chat-stop-btn {
     width: 34px;
     height: 34px;
-    border-radius: 9px;
+    border-radius: 0;
     border: none;
     background: #e03131;
     color: #fff;
@@ -963,8 +1003,8 @@ html, body {
     width: min(480px, 90vw);
     background: var(--bg-surface);
     border: 1px solid var(--border-light);
-    border-radius: var(--radius-lg);
-    box-shadow: 0 16px 48px rgba(0,0,0,0.7);
+    border-radius: 0;
+    box-shadow: 0 20px 48px rgba(0,0,0,0.45);
     z-index: 301;
     display: flex;
     flex-direction: column;
@@ -1009,10 +1049,7 @@ html, body {
 #tool-picker-backdrop {
     position: fixed;
     inset: 0;
-    background:
-        radial-gradient(circle at top, color-mix(in srgb, var(--accent) 20%, transparent), transparent 35%),
-        rgba(3, 6, 12, 0.72);
-    backdrop-filter: blur(8px);
+    background: rgba(6, 8, 12, 0.72);
     z-index: 320;
 }
 
@@ -1025,12 +1062,10 @@ html, body {
     max-height: min(720px, calc(100vh - 32px));
     display: flex;
     flex-direction: column;
-    background:
-        linear-gradient(180deg, rgba(255,255,255,0.03), transparent 32%),
-        var(--bg-surface);
-    border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border-light));
-    border-radius: 24px;
-    box-shadow: 0 28px 80px rgba(0,0,0,0.5);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-light);
+    border-radius: 0;
+    box-shadow: 0 28px 80px rgba(0,0,0,0.38);
     overflow: hidden;
     z-index: 321;
 }
@@ -1112,17 +1147,17 @@ html, body {
     gap: 14px;
     padding: 16px;
     text-align: left;
-    background: rgba(255,255,255,0.02);
+    background: var(--bg-raised);
     border: 1px solid var(--border);
-    border-radius: 18px;
+    border-radius: 0;
     color: inherit;
     cursor: pointer;
     transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
 }
 .tool-card:hover {
-    transform: translateY(-1px);
+    transform: none;
     border-color: color-mix(in srgb, var(--accent) 28%, var(--border-light));
-    background: rgba(255,255,255,0.04);
+    background: color-mix(in srgb, var(--accent) 6%, var(--bg-raised));
 }
 .tool-card--active {
     border-color: color-mix(in srgb, var(--accent) 50%, transparent);
@@ -1135,8 +1170,8 @@ html, body {
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: 14px;
-    background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 34%, transparent), rgba(255,255,255,0.02));
+    border-radius: 0;
+    background: color-mix(in srgb, var(--accent) 18%, var(--bg-input));
     color: var(--text);
     flex-shrink: 0;
 }
@@ -1421,7 +1456,7 @@ html, body {
 /* ── WASI module manager ────────────────────────────────────────────────── */
 .wasi-upload-area {
     border: 1.5px dashed var(--border-light);
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     padding: 20px;
     text-align: center;
     transition: border-color 0.15s, background 0.15s;
@@ -1464,7 +1499,7 @@ html, body {
     padding: 10px 12px;
     background: var(--bg-raised);
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    border-radius: 0;
 }
 
 .wasi-module-icon {
@@ -1474,7 +1509,7 @@ html, body {
     align-items: center;
     justify-content: center;
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     color: var(--accent);
     flex-shrink: 0;
 }
@@ -1544,10 +1579,111 @@ html, body {
     flex-direction: column;
     gap: 4px;
     padding: 8px 10px;
-    background: rgba(0,0,0,0.2);
+    background: var(--bg-input);
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    border-radius: 0;
     margin-bottom: 6px;
+}
+
+.msg-citations {
+    margin-top: 8px;
+    width: 100%;
+    max-width: 90%;
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+}
+
+.msg-citations-title {
+    margin-bottom: 6px;
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+
+.msg-citation {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-left: 2px solid color-mix(in srgb, var(--accent) 36%, var(--border));
+    background: var(--bg-input);
+    margin-bottom: 6px;
+}
+
+.msg-citation-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.msg-citation-name {
+    font-size: 0.8rem;
+    color: var(--text);
+    font-weight: 600;
+}
+
+.msg-citation-path,
+.msg-citation-excerpt {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.msg-citation-excerpt {
+    margin-top: 4px;
+    line-height: 1.45;
+}
+
+.chat-file-remove {
+    width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+}
+
+.chat-file-confirm-btn {
+    border-color: color-mix(in srgb, #e03131 35%, var(--border-light));
+    color: #ffb4b4;
+}
+
+.chat-file-remove:hover {
+    color: #e03131;
+}
+
+.kb-file-list {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.kb-file-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    background: var(--bg-input);
+    min-height: 42px;
+}
+
+.kb-file-name {
+    font-size: 0.8rem;
+    color: var(--text);
+}
+
+.kb-file-meta {
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
 }
 
 .tool-invocation:last-child {

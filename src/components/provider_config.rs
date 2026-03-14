@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
+use std::collections::HashMap;
 
-use crate::db::{self, KnowledgeBase, WasiApp, WasmModel};
+use crate::db::{self, KnowledgeBase, KnowledgeBaseFile, WasiApp, WasmModel};
 use crate::providers;
 use crate::rag;
 use crate::tools;
@@ -115,12 +116,48 @@ fn KnowledgeBasesSection(
     ollama_base_url: Signal<String>,
     mut knowledge_bases: Signal<Vec<KnowledgeBase>>,
 ) -> Element {
+    fn format_bytes(byte_size: u64) -> String {
+        const KB: u64 = 1024;
+        const MB: u64 = KB * 1024;
+
+        if byte_size >= MB {
+            format!("{:.1} MB", byte_size as f64 / MB as f64)
+        } else if byte_size >= KB {
+            format!("{:.1} KB", byte_size as f64 / KB as f64)
+        } else {
+            format!("{byte_size} B")
+        }
+    }
+
     let mut name = use_signal(String::new);
     let mut description = use_signal(String::new);
     let available_models = rag::default_embedding_models();
     let mut embedding_model = use_signal(|| available_models.first().cloned().unwrap_or_default());
     let mut upload_error = use_signal(|| Option::<String>::None);
     let mut uploading_kb: Signal<Option<String>> = use_signal(|| None);
+    let mut pending_kb_file_delete: Signal<Option<String>> = use_signal(|| None);
+    let mut kb_files: Signal<HashMap<String, Vec<KnowledgeBaseFile>>> = use_signal(HashMap::new);
+
+    use_effect(move || {
+        let mut next = HashMap::new();
+        for kb in knowledge_bases.read().iter() {
+            next.insert(
+                kb.id.clone(),
+                db::list_knowledge_base_files(&conn.read(), &kb.id).unwrap_or_default(),
+            );
+        }
+        kb_files.set(next);
+    });
+
+    let mut refresh_kb_files = {
+        let conn = conn.clone();
+        move |knowledge_base_id: &str| {
+            kb_files.write().insert(
+                knowledge_base_id.to_string(),
+                db::list_knowledge_base_files(&conn.read(), knowledge_base_id).unwrap_or_default(),
+            );
+        }
+    };
 
     rsx! {
         div { class: "config-section",
@@ -245,8 +282,8 @@ fn KnowledgeBasesSection(
                                             let base_url = ollama_base_url.read().clone();
                                             uploading_kb.set(Some(kb_id_inner.clone()));
                                             upload_error.set(None);
-                                            spawn(async move {
-                                                for file in files {
+                                             spawn(async move {
+                                                 for file in files {
                                                     let file_name = file.name();
                                                     match file.read_bytes().await {
                                                         Ok(bytes) => {
@@ -278,11 +315,79 @@ fn KnowledgeBasesSection(
                                                         }
                                                         Err(err) => upload_error.set(Some(format!("Failed to read file: {err}"))),
                                                     }
+                                                 }
+                                                 knowledge_bases.set(db::list_knowledge_bases(&conn.read()).unwrap_or_default());
+                                                 kb_files.write().insert(
+                                                     kb_id_inner.clone(),
+                                                     db::list_knowledge_base_files(&conn.read(), &kb_id_inner).unwrap_or_default(),
+                                                 );
+                                                 uploading_kb.set(None);
+                                             });
+                                         },
+                                    }
+                                    if let Some(files) = kb_files.read().get(&kb.id).cloned() {
+                                        if !files.is_empty() {
+                                            div { class: "kb-file-list",
+                                                for file in files {
+                                                    {
+                                                        let file_id = file.id.clone();
+                                                        let kb_id_for_file = kb.id.clone();
+                                                        let status = if file.is_text { "indexed" } else { "binary" };
+                                                        let size_label = format_bytes(file.byte_size);
+                                                        let is_pending_delete = pending_kb_file_delete.read().as_deref() == Some(&file_id);
+                                                        rsx! {
+                                                            div { class: "kb-file-row", key: "kb-file-{file.id}",
+                                                                div { class: "kb-file-copy",
+                                                                    div { class: "kb-file-name", "{file.display_name}" }
+                                                                    div { class: "kb-file-meta", "{status} - {size_label} - {file.path}" }
+                                                                }
+                                                                div { class: "chat-file-actions",
+                                                                    if is_pending_delete {
+                                                                        button {
+                                                                            class: "ghost-btn ghost-btn--sm chat-file-confirm-btn",
+                                                                            onclick: {
+                                                                                let file_id = file_id.clone();
+                                                                                let kb_id_for_file = kb_id_for_file.clone();
+                                                                                move |_| {
+                                                                                    if db::delete_knowledge_base_file(&conn.read(), &file_id).is_ok() {
+                                                                                        refresh_kb_files(&kb_id_for_file);
+                                                                                        pending_kb_file_delete.set(None);
+                                                                                    }
+                                                                                }
+                                                                            },
+                                                                            "Confirm"
+                                                                        }
+                                                                        button {
+                                                                            class: "ghost-btn ghost-btn--sm",
+                                                                            onclick: move |_| pending_kb_file_delete.set(None),
+                                                                            "Cancel"
+                                                                        }
+                                                                    } else {
+                                                                        button {
+                                                                            class: "icon-btn icon-btn--danger",
+                                                                            title: "Delete file",
+                                                                            onclick: {
+                                                                                let file_id = file_id.clone();
+                                                                                move |_| pending_kb_file_delete.set(Some(file_id.clone()))
+                                                                            },
+                                                                            svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                                                                                fill: "none", stroke: "currentColor", stroke_width: "2",
+                                                                                width: "13", height: "13",
+                                                                                polyline { points: "3 6 5 6 21 6" }
+                                                                                path { d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" }
+                                                                                path { d: "M10 11v6" }
+                                                                                path { d: "M14 11v6" }
+                                                                                path { d: "M9 6V4h6v2" }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
-                                                knowledge_bases.set(db::list_knowledge_bases(&conn.read()).unwrap_or_default());
-                                                uploading_kb.set(None);
-                                            });
-                                        },
+                                            }
+                                        }
                                     }
                                     button {
                                         class: "icon-btn icon-btn--danger",
@@ -290,6 +395,7 @@ fn KnowledgeBasesSection(
                                         onclick: move |_| {
                                             db::delete_knowledge_base(&conn.read(), &kb_id_delete).ok();
                                             knowledge_bases.write().retain(|item| item.id != kb_id_delete);
+                                            kb_files.write().remove(&kb_id_delete);
                                         },
                                         svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
                                             fill: "none", stroke: "currentColor", stroke_width: "2",

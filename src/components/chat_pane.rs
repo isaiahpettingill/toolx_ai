@@ -14,6 +14,19 @@ use crate::tools::{self};
 
 use super::types::{run_builtin, UiMessage, PROVIDER_OLLAMA, PROVIDER_WASI};
 
+fn format_bytes(byte_size: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+
+    if byte_size >= MB {
+        format!("{:.1} MB", byte_size as f64 / MB as f64)
+    } else if byte_size >= KB {
+        format!("{:.1} KB", byte_size as f64 / KB as f64)
+    } else {
+        format!("{byte_size} B")
+    }
+}
+
 #[component]
 pub fn ChatPane(
     conn: Signal<rusqlite::Connection>,
@@ -37,6 +50,7 @@ pub fn ChatPane(
         use_signal(|| db::list_chat_files(&conn.read(), &chat_id).unwrap_or_default());
     let mut upload_error = use_signal(|| Option::<String>::None);
     let mut uploading_files = use_signal(|| false);
+    let mut pending_chat_file_delete: Signal<Option<String>> = use_signal(|| None);
 
     let is_streaming = streaming_chats.read().contains_key(&chat_id);
 
@@ -164,7 +178,7 @@ pub fn ChatPane(
                         return;
                     }
 
-                    let retrieved_context = rag::retrieve_for_chat(
+                    let retrieved_chunks = rag::retrieve_for_chat(
                         &conn2.read(),
                         &base_url,
                         &chat_id2,
@@ -173,8 +187,9 @@ pub fn ChatPane(
                         6,
                     )
                     .await
-                    .map(|chunks| rag::format_retrieved_context(&chunks))
                     .unwrap_or_default();
+                    let retrieved_context = rag::format_retrieved_context(&retrieved_chunks);
+                    let retrieved_citations = rag::to_message_citations(&retrieved_chunks);
 
                     let mut rx = providers::ollama::chat_stream(
                         base_url,
@@ -194,11 +209,12 @@ pub fn ChatPane(
                     while let Some(chunk) = rx.recv().await {
                         if cancel.load(Ordering::Relaxed) {
                             if !full_content.is_empty() {
-                                if let Ok(saved) = db::add_message(
+                                if let Ok(saved) = db::add_message_with_citations(
                                     &conn2.read(),
                                     &chat_id2,
                                     "assistant",
                                     &full_content,
+                                    &retrieved_citations,
                                 ) {
                                     if let Some(msg) =
                                         messages.write().iter_mut().find(|m| m.id == stream_id)
@@ -207,6 +223,7 @@ pub fn ChatPane(
                                         msg.content = full_content.clone();
                                         msg.html = markdown::render(&full_content);
                                         msg.streaming = false;
+                                        msg.citations = retrieved_citations.clone();
                                     }
                                 }
                             } else {
@@ -231,11 +248,12 @@ pub fn ChatPane(
                                 }
 
                                 if let Some(final_content) = stream_chunk.final_content {
-                                    if let Ok(saved) = db::add_message(
+                                    if let Ok(saved) = db::add_message_with_citations(
                                         &conn2.read(),
                                         &chat_id2,
                                         "assistant",
                                         &final_content,
+                                        &retrieved_citations,
                                     ) {
                                         if let Some(msg) =
                                             messages.write().iter_mut().find(|m| m.id == stream_id)
@@ -246,6 +264,9 @@ pub fn ChatPane(
                                             msg.streaming = false;
                                             msg.tool_invocations =
                                                 stream_chunk.tool_invocations.unwrap_or_default();
+                                            msg.citations = stream_chunk
+                                                .citations
+                                                .unwrap_or_else(|| retrieved_citations.clone());
                                         }
                                     }
                                     streaming_chats.write().remove(&chat_id2);
@@ -255,11 +276,12 @@ pub fn ChatPane(
                             }
                             Err(e) => {
                                 let rendered = format!("Error: {e}");
-                                if let Ok(saved) = db::add_message(
+                                if let Ok(saved) = db::add_message_with_citations(
                                     &conn2.read(),
                                     &chat_id2,
                                     "assistant",
                                     &rendered,
+                                    &retrieved_citations,
                                 ) {
                                     if let Some(msg) =
                                         messages.write().iter_mut().find(|m| m.id == stream_id)
@@ -270,6 +292,7 @@ pub fn ChatPane(
                                             "<span style='color:#e03131'>{rendered}</span>"
                                         );
                                         msg.streaming = false;
+                                        msg.citations = retrieved_citations.clone();
                                     }
                                 }
                                 streaming_chats.write().remove(&chat_id2);
@@ -514,6 +537,17 @@ pub fn ChatPane(
         }
     };
 
+    let delete_chat_file = {
+        let conn = conn.clone();
+        move |file_id: String| {
+            if db::delete_chat_file(&conn.read(), &file_id).is_ok() {
+                uploaded_files.write().retain(|file| file.id != file_id);
+                pending_chat_file_delete.set(None);
+                on_messages_changed.call(());
+            }
+        }
+    };
+
     rsx! {
         div { id: "chat-pane",
 
@@ -597,6 +631,7 @@ pub fn ChatPane(
                         let msg_id = msg.id.clone();
                         let streaming = msg.streaming;
                         let tool_invocations = msg.tool_invocations.clone();
+                        let citations = msg.citations.clone();
                         let thinking = msg.thinking.clone();
                         rsx! {
                             div {
@@ -636,6 +671,22 @@ pub fn ChatPane(
                                                 }
                                                 div { class: "tool-invocation-query",
                                                     "{invocation.query}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if !is_user && !citations.is_empty() {
+                                    div { class: "msg-citations",
+                                        div { class: "msg-citations-title", "Sources" }
+                                        for (idx, citation) in citations.iter().enumerate() {
+                                            div { class: "msg-citation", key: "citation-{msg_id}-{idx}",
+                                                div { class: "msg-citation-header",
+                                                    span { class: "msg-citation-name", "{citation.source_label}" }
+                                                    span { class: "msg-citation-path", "{citation.path}" }
+                                                }
+                                                if !citation.excerpt.is_empty() {
+                                                    div { class: "msg-citation-excerpt", "{citation.excerpt}" }
                                                 }
                                             }
                                         }
@@ -762,6 +813,7 @@ pub fn ChatPane(
                     div { id: "chat-file-list",
                         for file in uploaded_files.read().iter() {
                             {
+                                let file_id = file.id.clone();
                                 let status = if !file.is_text {
                                     "binary"
                                 } else if !file.inline_context.is_empty() {
@@ -774,10 +826,53 @@ pub fn ChatPane(
                                     "indexed" => "chat-file-chip chat-file-chip--indexed",
                                     _ => "chat-file-chip",
                                 };
+                                let is_pending_delete = pending_chat_file_delete.read().as_deref() == Some(&file_id);
+                                let size_label = format_bytes(file.byte_size);
                                 rsx! {
                                     div { class: class_name, key: "file-{file.id}",
-                                        span { "{file.display_name}" }
-                                        span { class: "chat-file-meta", "{status}" }
+                                        div { class: "chat-file-copy",
+                                            div { class: "chat-file-name-row",
+                                                span { class: "chat-file-name", "{file.display_name}" }
+                                                span { class: "chat-file-meta", "{status}" }
+                                            }
+                                            div { class: "chat-file-details", "{file.path} - {size_label}" }
+                                        }
+                                        div { class: "chat-file-actions",
+                                            if is_pending_delete {
+                                                button {
+                                                    class: "ghost-btn ghost-btn--sm chat-file-confirm-btn",
+                                                    onclick: {
+                                                        let file_id = file_id.clone();
+                                                        let mut delete_chat_file = delete_chat_file.clone();
+                                                        move |_| delete_chat_file(file_id.clone())
+                                                    },
+                                                    "Confirm"
+                                                }
+                                                button {
+                                                    class: "ghost-btn ghost-btn--sm",
+                                                    onclick: move |_| pending_chat_file_delete.set(None),
+                                                    "Cancel"
+                                                }
+                                            } else {
+                                                button {
+                                                    class: "chat-file-remove",
+                                                    title: "Delete file",
+                                                    onclick: {
+                                                        let file_id = file_id.clone();
+                                                        move |_| pending_chat_file_delete.set(Some(file_id.clone()))
+                                                    },
+                                                    svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                                                        fill: "none", stroke: "currentColor", stroke_width: "2",
+                                                        width: "12", height: "12",
+                                                        polyline { points: "3 6 5 6 21 6" }
+                                                        path { d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" }
+                                                        path { d: "M10 11v6" }
+                                                        path { d: "M14 11v6" }
+                                                        path { d: "M9 6V4h6v2" }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
