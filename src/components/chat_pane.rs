@@ -51,6 +51,8 @@ pub fn ChatPane(
     let mut upload_error = use_signal(|| Option::<String>::None);
     let mut uploading_files = use_signal(|| false);
     let mut pending_chat_file_delete: Signal<Option<String>> = use_signal(|| None);
+    let mut thinking_expanded = use_signal(|| true);
+    let mut citations_expanded = use_signal(|| true);
 
     let is_streaming = streaming_chats.read().contains_key(&chat_id);
 
@@ -512,31 +514,6 @@ pub fn ChatPane(
         }
     };
 
-    let on_change_embedding_model = {
-        let conn = conn.clone();
-        let chat_id = chat_id.clone();
-        move |event: FormEvent| {
-            let next_model = event.value();
-            if next_model.trim().is_empty() {
-                return;
-            }
-            current_embedding_model.set(next_model.clone());
-            db::update_chat_embedding_model(&conn.read(), &chat_id, &next_model).ok();
-
-            let base_url = ollama_base_url.read().clone();
-            let files_to_reindex = uploaded_files()
-                .into_iter()
-                .filter(|file| file.is_text && file.inline_context.is_empty())
-                .collect::<Vec<_>>();
-            spawn(async move {
-                for file in files_to_reindex {
-                    let _ = rag::index_chat_file(&conn.read(), &base_url, &next_model, &file).await;
-                }
-                on_messages_changed.call(());
-            });
-        }
-    };
-
     let delete_chat_file = {
         let conn = conn.clone();
         move |file_id: String| {
@@ -639,7 +616,18 @@ pub fn ChatPane(
                                 key: "{msg_id}",
                                 if !is_user && thinking.is_some() {
                                     div { class: "msg-thinking",
-                                        "{thinking.as_ref().unwrap()}"
+                                        div { class: "msg-section-header",
+                                            onclick: move |_| *thinking_expanded.write() ^= true,
+                                            span { class: if thinking_expanded() { "msg-chevron msg-chevron--expanded" } else { "msg-chevron" },
+                                                svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", width: "12", height: "12", path { d: "m9 18 6-6-6-6" } }
+                                            }
+                                            "Thinking"
+                                        }
+                                        if thinking_expanded() {
+                                            div { class: "msg-thinking-content",
+                                                "{thinking.as_ref().unwrap()}"
+                                            }
+                                        }
                                     }
                                 }
                                 div {
@@ -678,15 +666,25 @@ pub fn ChatPane(
                                 }
                                 if !is_user && !citations.is_empty() {
                                     div { class: "msg-citations",
-                                        div { class: "msg-citations-title", "Sources" }
-                                        for (idx, citation) in citations.iter().enumerate() {
-                                            div { class: "msg-citation", key: "citation-{msg_id}-{idx}",
-                                                div { class: "msg-citation-header",
-                                                    span { class: "msg-citation-name", "{citation.source_label}" }
-                                                    span { class: "msg-citation-path", "{citation.path}" }
-                                                }
-                                                if !citation.excerpt.is_empty() {
-                                                    div { class: "msg-citation-excerpt", "{citation.excerpt}" }
+                                        div { class: "msg-section-header msg-citations-header",
+                                            onclick: move |_| *citations_expanded.write() ^= true,
+                                            span { class: if citations_expanded() { "msg-chevron msg-chevron--expanded" } else { "msg-chevron" },
+                                                svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", width: "12", height: "12", path { d: "m9 18 6-6-6-6" } }
+                                            }
+                                            span { class: "msg-citations-title", "Sources ({citations.len()})" }
+                                        }
+                                        if citations_expanded() {
+                                            div { class: "msg-citations-content",
+                                                for (idx, citation) in citations.iter().enumerate() {
+                                                    div { class: "msg-citation", key: "citation-{msg_id}-{idx}",
+                                                        div { class: "msg-citation-header",
+                                                            span { class: "msg-citation-name", "{citation.source_label}" }
+                                                            span { class: "msg-citation-path", "{citation.path}" }
+                                                        }
+                                                        if !citation.excerpt.is_empty() {
+                                                            div { class: "msg-citation-excerpt", "{citation.excerpt}" }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -778,26 +776,6 @@ pub fn ChatPane(
                 }
 
                 div { id: "chat-meta-row",
-                    label { class: "chat-upload-label", r#for: "chat-file-input",
-                        if uploading_files() { "Uploading files..." } else { "Upload files" }
-                    }
-                    input {
-                        id: "chat-file-input",
-                        r#type: "file",
-                        multiple: true,
-                        style: "display:none",
-                        onchange: on_upload_files,
-                    }
-
-                    select {
-                        id: "chat-embed-select",
-                        value: "{current_embedding_model}",
-                        onchange: on_change_embedding_model,
-                        for model in rag::default_embedding_models() {
-                            option { value: "{model}", "Embeddings: {model}" }
-                        }
-                    }
-
                     for kb in chat_knowledge_bases.read().iter() {
                         span { class: "chat-tool-chip chat-kb-chip", key: "kb-{kb.id}",
                             "KB: {kb.name}"
@@ -881,6 +859,23 @@ pub fn ChatPane(
                 }
 
                 div { id: "chat-input-bar",
+                    label {
+                        id: "chat-file-attach-btn",
+                        title: "Attach files",
+                        r#for: "chat-file-input",
+                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24",
+                            fill: "none", stroke: "currentColor", stroke_width: "2",
+                            width: "18", height: "18",
+                            path { d: "M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" }
+                        }
+                    }
+                    input {
+                        id: "chat-file-input",
+                        r#type: "file",
+                        multiple: true,
+                        style: "display:none",
+                        onchange: on_upload_files,
+                    }
                     textarea {
                         id: "chat-input",
                         placeholder: "Message {current_model}...",

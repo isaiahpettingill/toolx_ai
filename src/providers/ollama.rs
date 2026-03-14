@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use super::{ChatAttachment, ChatKnowledgeBaseRef, Message, ProviderError, RemoteModel};
 use crate::db::MessageCitation;
 use crate::db::{self, WasiApp};
+use crate::rag;
 use crate::tools::{
     self, ChatToolConfig, ChatToolKind, DuckDuckGoSearchTool, ReadTextFileTool, ToolInvocation,
     VfsHandle, WasiAppTool, WriteTextFileTool,
@@ -33,6 +34,40 @@ struct TagsResponse {
 #[derive(Deserialize)]
 struct TagModel {
     name: String,
+}
+
+/// Known embeddings model name patterns
+const EMBEDDING_PATTERNS: &[&str] = &[
+    "embed",
+    "nomic",
+    "mxbai",
+    "all-minilm",
+    "bge-",
+    "e5-",
+    "gte-",
+];
+
+/// Fetch embeddings models from Ollama - returns static list filtered to known patterns if available
+pub async fn list_embedding_models(base_url: &str) -> Vec<String> {
+    let tags = match list_models(base_url).await {
+        Ok(models) => models,
+        Err(_) => return rag::default_embedding_models(),
+    };
+
+    let embedding_models: Vec<String> = tags
+        .into_iter()
+        .filter(|m| {
+            let name_lower = m.id.to_lowercase();
+            EMBEDDING_PATTERNS.iter().any(|p| name_lower.contains(p))
+        })
+        .map(|m| m.id)
+        .collect();
+
+    if embedding_models.is_empty() {
+        rag::default_embedding_models()
+    } else {
+        embedding_models
+    }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

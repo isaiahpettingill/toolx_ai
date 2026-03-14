@@ -407,6 +407,12 @@ pub fn ChatApp() -> Element {
                             span { "Providers" }
                         }
                         ColorPicker { accent }
+                        EmbeddingsPicker {
+                            current_embedding_model,
+                            conn: conn.clone(),
+                            active_chat_id: active_chat_id.clone(),
+                            ollama_base_url: ollama_base_url.clone(),
+                        }
                     }
                 }
 
@@ -511,6 +517,50 @@ fn commit_rename(
         }
     }
     renaming_id.set(None);
+}
+
+// ── Embeddings picker for sidebar ───────────────────────────────────────────────
+
+#[component]
+fn EmbeddingsPicker(
+    mut current_embedding_model: Signal<String>,
+    conn: Signal<rusqlite::Connection>,
+    active_chat_id: Signal<Option<String>>,
+    ollama_base_url: Signal<String>,
+) -> Element {
+    let available_models = use_resource(move || async move {
+        providers::ollama::list_embedding_models(&ollama_base_url.read()).await
+    });
+
+    let models = match available_models.read().as_ref() {
+        Some(m) => m.clone(),
+        None => rag::default_embedding_models(),
+    };
+
+    rsx! {
+        div { id: "embeddings-picker",
+            div { id: "embeddings-picker-label", "Embeddings" }
+            div { id: "embeddings-picker-control",
+                select {
+                    id: "sidebar-embed-select",
+                    value: "{current_embedding_model}",
+                    onchange: move |e: FormEvent| {
+                        let next_model = e.value();
+                        if next_model.trim().is_empty() {
+                            return;
+                        }
+                        current_embedding_model.set(next_model.clone());
+                        if let Some(chat_id) = active_chat_id() {
+                            db::update_chat_embedding_model(&conn.read(), &chat_id, &next_model).ok();
+                        }
+                    },
+                    for model in models {
+                        option { value: "{model}", "{model}" }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── Mobile header bar ─────────────────────────────────────────────────────────

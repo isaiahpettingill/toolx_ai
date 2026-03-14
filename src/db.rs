@@ -322,12 +322,20 @@ fn init_schema(conn: Connection) -> Result<Connection> {
             value TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS wasm_models (
-            id         TEXT PRIMARY KEY,
-            name       TEXT NOT NULL,
-            file_path  TEXT NOT NULL DEFAULT '',
-            file_size  INTEGER NOT NULL DEFAULT 0,
-            bytes      BLOB,
-            created_at TEXT NOT NULL
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            file_path   TEXT NOT NULL DEFAULT '',
+            file_size   INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS wasi_apps (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            description  TEXT NOT NULL DEFAULT '',
+            help_text    TEXT NOT NULL DEFAULT '',
+            file_path    TEXT NOT NULL DEFAULT '',
+            file_size    INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS wasi_apps (
             id           TEXT PRIMARY KEY,
@@ -657,23 +665,15 @@ fn maybe_materialize_legacy_wasi_app(
 
 pub fn list_wasm_models(conn: &Connection) -> Result<Vec<WasmModel>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, file_path, file_size, bytes, created_at FROM wasm_models ORDER BY created_at ASC",
+        "SELECT id, name, file_path, file_size, created_at FROM wasm_models ORDER BY created_at ASC",
     )?;
     let rows = stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
-        let name: String = row.get(1)?;
-        let file_path: String = row.get(2)?;
-        let file_size = row.get::<_, i64>(3)? as u64;
-        let bytes: Option<Vec<u8>> = row.get(4)?;
-        let created_at: String = row.get(5)?;
-        let (file_path, file_size) =
-            maybe_materialize_legacy_wasm(conn, &id, &name, &file_path, file_size, bytes)?;
         Ok(WasmModel {
-            id,
-            name,
-            file_path,
-            file_size,
-            created_at,
+            id: row.get(0)?,
+            name: row.get(1)?,
+            file_path: row.get(2)?,
+            file_size: row.get::<_, i64>(3)? as u64,
+            created_at: row.get(4)?,
         })
     })?;
     rows.collect()
@@ -685,7 +685,7 @@ pub fn add_wasm_model(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Was
     let (file_path, file_size) =
         write_named_file(&artifact_root("wasm_models"), &id, name, bytes).map_err(io_to_sql)?;
     conn.execute(
-        "INSERT INTO wasm_models (id, name, file_path, file_size, bytes, created_at) VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+        "INSERT INTO wasm_models (id, name, file_path, file_size, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![id, name, file_path, file_size as i64, now],
     )?;
     Ok(WasmModel {
@@ -732,27 +732,17 @@ pub fn delete_wasm_model(conn: &Connection, id: &str) -> Result<()> {
 
 pub fn list_wasi_apps(conn: &Connection) -> Result<Vec<WasiApp>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, description, help_text, file_path, file_size, bytes, created_at FROM wasi_apps ORDER BY created_at ASC",
+        "SELECT id, name, description, help_text, file_path, file_size, created_at FROM wasi_apps ORDER BY created_at ASC",
     )?;
     let rows = stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
-        let name: String = row.get(1)?;
-        let description: String = row.get(2)?;
-        let help_text: String = row.get(3)?;
-        let file_path: String = row.get(4)?;
-        let file_size = row.get::<_, i64>(5)? as u64;
-        let bytes: Option<Vec<u8>> = row.get(6)?;
-        let created_at: String = row.get(7)?;
-        let (file_path, file_size) =
-            maybe_materialize_legacy_wasi_app(conn, &id, &name, &file_path, file_size, bytes)?;
         Ok(WasiApp {
-            id,
-            name,
-            description,
-            help_text,
-            file_path,
-            file_size,
-            created_at,
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            help_text: row.get(3)?,
+            file_path: row.get(4)?,
+            file_size: row.get::<_, i64>(5)? as u64,
+            created_at: row.get(6)?,
         })
     })?;
     rows.collect()
@@ -770,9 +760,17 @@ pub fn add_wasi_app(
     let (file_path, file_size) =
         write_named_file(&artifact_root("wasi_apps"), &id, name, bytes).map_err(io_to_sql)?;
     conn.execute(
-        "INSERT INTO wasi_apps (id, name, description, help_text, file_path, file_size, bytes, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)",
-        params![id, name, description, help_text, file_path, file_size as i64, now],
+        "INSERT INTO wasi_apps (id, name, description, help_text, file_path, file_size, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id,
+            name,
+            description,
+            help_text,
+            file_path,
+            file_size as i64,
+            now
+        ],
     )?;
     Ok(WasiApp {
         id,
