@@ -51,12 +51,15 @@ pub fn ChatPane(
     let mut upload_error = use_signal(|| Option::<String>::None);
     let mut uploading_files = use_signal(|| false);
     let mut pending_chat_file_delete: Signal<Option<String>> = use_signal(|| None);
-    let mut thinking_expanded = use_signal(|| true);
-    let mut citations_expanded = use_signal(|| true);
+     let mut thinking_expanded = use_signal(|| true);
+     let mut citations_expanded = use_signal(|| true);
 
-    let is_streaming = streaming_chats.read().contains_key(&chat_id);
+     let is_streaming = {
+         let chat_id = chat_id.clone();
+         use_memo(move || streaming_chats.read().contains_key(&chat_id))
+     };
 
-    let mut sys_prompt_open = use_signal(|| false);
+     let mut sys_prompt_open = use_signal(|| false);
     let mut sys_prompt_draft = use_signal(|| current_system_prompt.read().clone());
 
     use_effect(move || {
@@ -180,7 +183,7 @@ pub fn ChatPane(
                         return;
                     }
 
-                    let retrieved_chunks = rag::retrieve_for_chat(
+                    let retrieved_chunks = match rag::retrieve_for_chat(
                         &conn2.read(),
                         &base_url,
                         &chat_id2,
@@ -188,8 +191,13 @@ pub fn ChatPane(
                         &text,
                         6,
                     )
-                    .await
-                    .unwrap_or_default();
+                    .await {
+                        Ok(chunks) => chunks,
+                        Err(e) => {
+                            eprintln!("KB retrieval error: {e}");
+                            Vec::new()
+                        }
+                    };
                     let retrieved_context = rag::format_retrieved_context(&retrieved_chunks);
                     let retrieved_citations = rag::to_message_citations(&retrieved_chunks);
 
@@ -881,7 +889,7 @@ pub fn ChatPane(
                         placeholder: "Message {current_model}...",
                         rows: "1",
                         value: "{input}",
-                        disabled: is_streaming,
+                        disabled: is_streaming(),
                         oninput: move |e| input.set(e.value()),
                         onkeydown: {
                             let mut do_send = do_send.clone();
@@ -893,7 +901,7 @@ pub fn ChatPane(
                             }
                         },
                     }
-                    if is_streaming {
+                    if is_streaming() {
                         button {
                             id: "chat-stop-btn",
                             title: "Stop generation",
