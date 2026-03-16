@@ -8,7 +8,6 @@ use rig::agent::MultiTurnStreamItem;
 use rig::client::CompletionClient;
 use rig::client::Nothing;
 use rig::completion::message::Message as RigMessage;
-use rig::completion::Chat;
 use rig::providers::ollama as rig_ollama;
 use rig::streaming::{StreamedAssistantContent, StreamingChat};
 use rig::tool::ToolDyn;
@@ -104,10 +103,6 @@ pub async fn list_models(base_url: &str) -> Result<Vec<RemoteModel>, ProviderErr
 }
 
 /// Chat result that includes tool invocations
-pub struct ChatResult {
-    pub content: String,
-    pub tool_invocations: Vec<ToolInvocation>,
-}
 
 pub fn chat_stream(
     base_url: String,
@@ -157,155 +152,6 @@ pub struct StreamChunk {
     pub citations: Option<Vec<MessageCitation>>,
 }
 
-pub async fn chat(
-    base_url: String,
-    model: String,
-    system_prompt: String,
-    messages: Vec<Message>,
-    prompt: String,
-    active_tools: Vec<ChatToolConfig>,
-    wasi_apps: Vec<WasiApp>,
-    vfs: VfsHandle,
-    attachments: Vec<ChatAttachment>,
-    knowledge_bases: Vec<ChatKnowledgeBaseRef>,
-    retrieved_context: String,
-) -> Result<ChatResult, ProviderError> {
-    let client = rig_ollama::Client::builder()
-        .api_key(Nothing)
-        .base_url(base_url)
-        .build()
-        .map_err(|e| ProviderError::Http(e.to_string()))?;
-
-    let preamble = tools::build_agent_preamble(
-        &system_prompt,
-        &model,
-        &active_tools,
-        &wasi_apps,
-        &attachments,
-        &knowledge_bases,
-        &retrieved_context,
-    );
-    let history = messages
-        .into_iter()
-        .map(into_rig_message)
-        .collect::<Vec<_>>();
-    let vfs_root = {
-        let guard = vfs
-            .lock()
-            .map_err(|err| ProviderError::Io(err.to_string()))?;
-        db::chat_vfs_root(&guard.chat_id)
-    };
-
-    eprintln!("[DEBUG] Tools enabled: {:?}", active_tools);
-    eprintln!("[DEBUG] WASI apps: {:?}", wasi_apps.len());
-    eprintln!("[DEBUG] Preamble: {}", preamble);
-
-    let has_wasi = tools::has_wasi_tool(&active_tools);
-    let has_ddg = tools::has_tool(&active_tools, ChatToolKind::DuckDuckGoSearch);
-    let wasi_app_ids: Vec<String> = active_tools
-        .iter()
-        .filter_map(|t| t.wasi_app_id.clone())
-        .collect();
-    let has_wasi_app = !wasi_app_ids.is_empty();
-
-    let content = if has_wasi_app {
-        let enabled_wasi_apps: Vec<_> = wasi_apps
-            .iter()
-            .filter(|app| wasi_app_ids.contains(&app.id))
-            .collect();
-
-        let mut all_tools: Vec<Box<dyn ToolDyn>> = Vec::new();
-
-        if has_wasi {
-            all_tools.push(Box::new(ReadTextFileTool::new(vfs.clone())));
-            all_tools.push(Box::new(WriteTextFileTool::new(vfs.clone())));
-        }
-
-        if has_ddg {
-            all_tools.push(Box::new(DuckDuckGoSearchTool));
-        }
-
-        all_tools.extend(enabled_wasi_apps.iter().map(|app| {
-            Box::new(WasiAppTool::new(
-                &app.name,
-                &app.description,
-                &app.help_text,
-                app.file_path.clone(),
-                vfs_root.clone(),
-            )) as Box<dyn ToolDyn>
-        }));
-
-        let max_turns = if has_ddg || !wasi_app_ids.is_empty() {
-            6
-        } else {
-            4
-        };
-
-        client
-            .agent(&model)
-            .preamble(&preamble)
-            .tools(all_tools)
-            .default_max_turns(max_turns)
-            .build()
-            .chat(prompt, history)
-            .await
-            .map_err(|e| ProviderError::Parse(e.to_string()))?
-    } else if has_ddg && has_wasi {
-        let agent = client
-            .agent(&model)
-            .preamble(&preamble)
-            .tool(DuckDuckGoSearchTool)
-            .tool(ReadTextFileTool::new(vfs.clone()))
-            .tool(WriteTextFileTool::new(vfs.clone()))
-            .default_max_turns(4)
-            .build();
-        agent
-            .chat(prompt, history)
-            .await
-            .map_err(|e| ProviderError::Parse(e.to_string()))?
-    } else if has_ddg {
-        let agent = client
-            .agent(&model)
-            .preamble(&preamble)
-            .tool(DuckDuckGoSearchTool)
-            .default_max_turns(4)
-            .build();
-        agent
-            .chat(prompt, history)
-            .await
-            .map_err(|e| ProviderError::Parse(e.to_string()))?
-    } else if has_wasi {
-        let agent = client
-            .agent(&model)
-            .preamble(&preamble)
-            .tool(ReadTextFileTool::new(vfs.clone()))
-            .tool(WriteTextFileTool::new(vfs.clone()))
-            .default_max_turns(4)
-            .build();
-        agent
-            .chat(prompt, history)
-            .await
-            .map_err(|e| ProviderError::Parse(e.to_string()))?
-    } else {
-        client
-            .agent(&model)
-            .preamble(&preamble)
-            .default_max_turns(2)
-            .build()
-            .chat(prompt, history)
-            .await
-            .map_err(|e| ProviderError::Parse(e.to_string()))?
-    };
-
-    // Parse tool invocations from the response
-    let (clean_content, tool_invocations) = tools::parse_tool_invocations(&content);
-    eprintln!("[DEBUG] Parsed invocations: {:?}", tool_invocations);
-
-    Ok(ChatResult {
-        content: clean_content,
-        tool_invocations,
-    })
-}
 
 async fn run_chat_stream(
     base_url: String,

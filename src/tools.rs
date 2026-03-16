@@ -133,30 +133,14 @@ impl VirtualFs {
         Ok(())
     }
 
-    pub fn list_files(&self) -> Vec<String> {
-        let mut files: Vec<String> = self.files.keys().cloned().collect();
-        files.extend(db::list_chat_vfs_paths(&self.chat_id));
-        files.sort();
-        files.dedup();
-        files
-    }
 }
 
 pub type VfsHandle = Arc<Mutex<VirtualFs>>;
-
-pub fn new_vfs() -> VfsHandle {
-    Arc::new(Mutex::new(VirtualFs::default()))
-}
 
 pub fn vfs_from_json(chat_id: &str, json: &str) -> VfsHandle {
     let mut vfs: VirtualFs = serde_json::from_str(json).unwrap_or_default();
     vfs.chat_id = chat_id.to_string();
     Arc::new(Mutex::new(vfs))
-}
-
-pub fn vfs_to_json(vfs: &VfsHandle) -> String {
-    let guard = vfs.lock().unwrap();
-    serde_json::to_string(&*guard).unwrap_or_else(|_| "{}".to_string())
 }
 
 pub fn parse_tool_configs(json: &str) -> Vec<ChatToolConfig> {

@@ -200,14 +200,6 @@ pub fn chat_vfs_root(chat_id: &str) -> PathBuf {
     p
 }
 
-pub fn chat_tmp_root(chat_id: &str) -> PathBuf {
-    let mut p = storage_root();
-    p.push("chat_tmp");
-    p.push(chat_id);
-    fs::create_dir_all(&p).ok();
-    p
-}
-
 fn chat_upload_root(chat_id: &str) -> PathBuf {
     let mut p = storage_root();
     p.push("chat_uploads");
@@ -254,10 +246,6 @@ fn storage_relative(path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
-}
-
-pub fn safe_storage_name(name: &str) -> String {
-    safe_name(name)
 }
 
 pub fn resolve_storage_path(relative: &str) -> PathBuf {
@@ -711,24 +699,6 @@ pub fn list_wasm_models(conn: &Connection) -> Result<Vec<WasmModel>> {
     rows.collect()
 }
 
-pub fn add_wasm_model(conn: &Connection, name: &str, bytes: &[u8]) -> Result<WasmModel> {
-    let now = Utc::now().to_rfc3339();
-    let id = Uuid::new_v4().to_string();
-    let (file_path, file_size) =
-        write_named_file(&artifact_root("wasm_models"), &id, name, bytes).map_err(io_to_sql)?;
-    conn.execute(
-        "INSERT INTO wasm_models (id, name, file_path, file_size, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, name, file_path, file_size as i64, now],
-    )?;
-    Ok(WasmModel {
-        id,
-        name: name.to_string(),
-        file_path,
-        file_size,
-        created_at: now,
-    })
-}
-
 pub fn add_wasm_model_from_path(
     conn: &Connection,
     name: &str,
@@ -793,41 +763,6 @@ pub fn list_wasi_apps(conn: &Connection) -> Result<Vec<WasiApp>> {
         })
     })?;
     rows.collect()
-}
-
-pub fn add_wasi_app(
-    conn: &Connection,
-    name: &str,
-    description: &str,
-    help_text: &str,
-    bytes: &[u8],
-) -> Result<WasiApp> {
-    let now = Utc::now().to_rfc3339();
-    let id = Uuid::new_v4().to_string();
-    let (file_path, file_size) =
-        write_named_file(&artifact_root("wasi_apps"), &id, name, bytes).map_err(io_to_sql)?;
-    conn.execute(
-        "INSERT INTO wasi_apps (id, name, description, help_text, file_path, file_size, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            id,
-            name,
-            description,
-            help_text,
-            file_path,
-            file_size as i64,
-            now
-        ],
-    )?;
-    Ok(WasiApp {
-        id,
-        name: name.to_string(),
-        description: description.to_string(),
-        help_text: help_text.to_string(),
-        file_path,
-        file_size,
-        created_at: now,
-    })
 }
 
 pub fn add_wasi_app_from_path(
@@ -929,47 +864,12 @@ pub fn get_chat_vfs(conn: &Connection, chat_id: &str) -> Result<VirtualFs> {
         .unwrap_or_default())
 }
 
-pub fn update_chat_vfs(conn: &Connection, chat_id: &str, vfs: &VirtualFs) -> Result<()> {
-    let vfs_json = serde_json::to_string(vfs).unwrap_or_else(|_| "{}".to_string());
-    let now = Utc::now().to_rfc3339();
-    conn.execute(
-        "UPDATE chats SET vfs_json=?1, updated_at=?2 WHERE id=?3",
-        params![vfs_json, now, chat_id],
-    )?;
-    Ok(())
-}
-
 pub fn upsert_chat_vfs_text_file(chat_id: &str, path: &str, content: &str) -> std::io::Result<()> {
     let full_path = chat_vfs_root(chat_id).join(path.trim_start_matches('/'));
     if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(full_path, content)
-}
-
-pub fn list_chat_vfs_paths(chat_id: &str) -> Vec<String> {
-    let root = chat_vfs_root(chat_id);
-    let mut out = Vec::new();
-    collect_relative_files(&root, &root, &mut out);
-    out.sort();
-    out
-}
-
-fn collect_relative_files(root: &Path, current: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = fs::read_dir(current) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_relative_files(root, &path, out);
-        } else if let Ok(relative) = path.strip_prefix(root) {
-            out.push(format!(
-                "/{}",
-                relative.to_string_lossy().replace('\\', "/")
-            ));
-        }
-    }
 }
 
 pub fn add_chat_file(
@@ -1078,13 +978,6 @@ pub fn delete_chat_file(conn: &Connection, file_id: &str) -> Result<()> {
         conn.execute("DELETE FROM chat_files WHERE id=?1", params![file_id])?;
     }
     Ok(())
-}
-
-pub fn list_chat_inline_contexts(conn: &Connection, chat_id: &str) -> Result<Vec<ChatFile>> {
-    Ok(list_chat_files(conn, chat_id)?
-        .into_iter()
-        .filter(|file| !file.inline_context.is_empty())
-        .collect())
 }
 
 pub fn create_knowledge_base(
