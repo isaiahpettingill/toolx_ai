@@ -5,6 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -199,6 +200,14 @@ pub fn chat_vfs_root(chat_id: &str) -> PathBuf {
     p
 }
 
+pub fn chat_tmp_root(chat_id: &str) -> PathBuf {
+    let mut p = storage_root();
+    p.push("chat_tmp");
+    p.push(chat_id);
+    fs::create_dir_all(&p).ok();
+    p
+}
+
 fn chat_upload_root(chat_id: &str) -> PathBuf {
     let mut p = storage_root();
     p.push("chat_uploads");
@@ -247,6 +256,10 @@ fn storage_relative(path: &Path) -> String {
         .replace('\\', "/")
 }
 
+pub fn safe_storage_name(name: &str) -> String {
+    safe_name(name)
+}
+
 pub fn resolve_storage_path(relative: &str) -> PathBuf {
     let mut p = storage_root();
     for part in relative.split('/').filter(|part| !part.is_empty()) {
@@ -266,6 +279,26 @@ fn write_named_file(
     let path = parent.join(filename);
     fs::write(&path, bytes)?;
     Ok((storage_relative(&path), bytes.len() as u64))
+}
+
+pub fn allocate_storage_path(parent: &Path, id: &str, name: &str) -> io::Result<(PathBuf, String)> {
+    fs::create_dir_all(parent)?;
+    let filename = format!("{}-{}", id, safe_name(name));
+    let path = parent.join(filename);
+    let relative = storage_relative(&path);
+    Ok((path, relative))
+}
+
+pub fn copy_file_into_storage(
+    source: &Path,
+    parent: &Path,
+    id: &str,
+    name: &str,
+) -> io::Result<(String, u64)> {
+    let (dest_path, relative) = allocate_storage_path(parent, id, name)?;
+    fs::copy(source, &dest_path)?;
+    let size = fs::metadata(&dest_path)?.len();
+    Ok((relative, size))
 }
 
 fn remove_storage_file(relative: &str) {
@@ -335,16 +368,6 @@ fn init_schema(conn: Connection) -> Result<Connection> {
             help_text    TEXT NOT NULL DEFAULT '',
             file_path    TEXT NOT NULL DEFAULT '',
             file_size    INTEGER NOT NULL DEFAULT 0,
-            created_at   TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS wasi_apps (
-            id           TEXT PRIMARY KEY,
-            name         TEXT NOT NULL,
-            description  TEXT NOT NULL DEFAULT '',
-            help_text    TEXT NOT NULL DEFAULT '',
-            file_path    TEXT NOT NULL DEFAULT '',
-            file_size    INTEGER NOT NULL DEFAULT 0,
-            bytes        BLOB,
             created_at   TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS chat_files (
@@ -417,8 +440,58 @@ fn init_schema(conn: Connection) -> Result<Connection> {
         .ok();
     conn.execute_batch("ALTER TABLE wasi_apps ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0; ")
         .ok();
+    migrate_legacy_artifact_tables(&conn)?;
 
     Ok(conn)
+}
+
+fn migrate_legacy_artifact_tables(conn: &Connection) -> Result<()> {
+    if table_has_column(conn, "wasm_models", "bytes")? {
+        conn.execute_batch(
+            "CREATE TABLE wasm_models_new (
+                id          TEXT PRIMARY KEY,
+                name        TEXT NOT NULL,
+                file_path   TEXT NOT NULL DEFAULT '',
+                file_size   INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL
+            );
+            INSERT INTO wasm_models_new (id, name, file_path, file_size, created_at)
+            SELECT id, name, file_path, file_size, created_at FROM wasm_models;
+            DROP TABLE wasm_models;
+            ALTER TABLE wasm_models_new RENAME TO wasm_models;",
+        )?;
+    }
+
+    if table_has_column(conn, "wasi_apps", "bytes")? {
+        conn.execute_batch(
+            "CREATE TABLE wasi_apps_new (
+                id           TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                description  TEXT NOT NULL DEFAULT '',
+                help_text    TEXT NOT NULL DEFAULT '',
+                file_path    TEXT NOT NULL DEFAULT '',
+                file_size    INTEGER NOT NULL DEFAULT 0,
+                created_at   TEXT NOT NULL
+            );
+            INSERT INTO wasi_apps_new (id, name, description, help_text, file_path, file_size, created_at)
+            SELECT id, name, description, help_text, file_path, file_size, created_at FROM wasi_apps;
+            DROP TABLE wasi_apps;
+            ALTER TABLE wasi_apps_new RENAME TO wasi_apps;",
+        )?;
+    }
+
+    Ok(())
+}
+
+fn table_has_column(conn: &Connection, table_name: &str, column_name: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in rows {
+        if name? == column_name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
@@ -473,6 +546,11 @@ pub fn create_chat(
          VALUES (?1, ?2, ?3, ?4, '', '[]', '{}', '', ?5, ?6)",
         params![id, title, model, provider, now, now],
     )?;
+
+    // Create the chat's VFS directory on disk
+    let vfs_root = chat_vfs_root(&id);
+    fs::create_dir_all(&vfs_root).ok();
+
     Ok(ChatSummary {
         id,
         title: title.to_string(),
@@ -617,52 +695,6 @@ pub fn update_chat_embedding_model(
     Ok(())
 }
 
-fn maybe_materialize_legacy_wasm(
-    conn: &Connection,
-    id: &str,
-    name: &str,
-    file_path: &str,
-    file_size: u64,
-    bytes: Option<Vec<u8>>,
-) -> Result<(String, u64)> {
-    if !file_path.is_empty() {
-        return Ok((file_path.to_string(), file_size));
-    }
-    let Some(bytes) = bytes else {
-        return Ok((String::new(), file_size));
-    };
-    let (new_path, new_size) =
-        write_named_file(&artifact_root("wasm_models"), id, name, &bytes).map_err(io_to_sql)?;
-    conn.execute(
-        "UPDATE wasm_models SET file_path=?1, file_size=?2, bytes=NULL WHERE id=?3",
-        params![new_path, new_size as i64, id],
-    )?;
-    Ok((new_path, new_size))
-}
-
-fn maybe_materialize_legacy_wasi_app(
-    conn: &Connection,
-    id: &str,
-    name: &str,
-    file_path: &str,
-    file_size: u64,
-    bytes: Option<Vec<u8>>,
-) -> Result<(String, u64)> {
-    if !file_path.is_empty() {
-        return Ok((file_path.to_string(), file_size));
-    }
-    let Some(bytes) = bytes else {
-        return Ok((String::new(), file_size));
-    };
-    let (new_path, new_size) =
-        write_named_file(&artifact_root("wasi_apps"), id, name, &bytes).map_err(io_to_sql)?;
-    conn.execute(
-        "UPDATE wasi_apps SET file_path=?1, file_size=?2, bytes=NULL WHERE id=?3",
-        params![new_path, new_size as i64, id],
-    )?;
-    Ok((new_path, new_size))
-}
-
 pub fn list_wasm_models(conn: &Connection) -> Result<Vec<WasmModel>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, file_path, file_size, created_at FROM wasm_models ORDER BY created_at ASC",
@@ -697,25 +729,40 @@ pub fn add_wasm_model(conn: &Connection, name: &str, bytes: &[u8]) -> Result<Was
     })
 }
 
+pub fn add_wasm_model_from_path(
+    conn: &Connection,
+    name: &str,
+    source_path: &Path,
+) -> Result<WasmModel> {
+    let now = Utc::now().to_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    let (file_path, file_size) =
+        copy_file_into_storage(source_path, &artifact_root("wasm_models"), &id, name)
+            .map_err(io_to_sql)?;
+    conn.execute(
+        "INSERT INTO wasm_models (id, name, file_path, file_size, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, name, file_path, file_size as i64, now],
+    )?;
+    Ok(WasmModel {
+        id,
+        name: name.to_string(),
+        file_path,
+        file_size,
+        created_at: now,
+    })
+}
+
 pub fn get_wasm_model(conn: &Connection, id: &str) -> Result<Option<WasmModel>> {
     conn.query_row(
-        "SELECT id, name, file_path, file_size, bytes, created_at FROM wasm_models WHERE id=?1",
+        "SELECT id, name, file_path, file_size, created_at FROM wasm_models WHERE id=?1",
         params![id],
         |row| {
-            let id: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let file_path: String = row.get(2)?;
-            let file_size = row.get::<_, i64>(3)? as u64;
-            let bytes: Option<Vec<u8>> = row.get(4)?;
-            let created_at: String = row.get(5)?;
-            let (file_path, file_size) =
-                maybe_materialize_legacy_wasm(conn, &id, &name, &file_path, file_size, bytes)?;
             Ok(WasmModel {
-                id,
-                name,
-                file_path,
-                file_size,
-                created_at,
+                id: row.get(0)?,
+                name: row.get(1)?,
+                file_path: row.get(2)?,
+                file_size: row.get::<_, i64>(3)? as u64,
+                created_at: row.get(4)?,
             })
         },
     )
@@ -783,24 +830,74 @@ pub fn add_wasi_app(
     })
 }
 
+pub fn add_wasi_app_from_path(
+    conn: &Connection,
+    name: &str,
+    description: &str,
+    help_text: &str,
+    source_path: &Path,
+) -> Result<WasiApp> {
+    let now = Utc::now().to_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    let (file_path, file_size) =
+        copy_file_into_storage(source_path, &artifact_root("wasi_apps"), &id, name)
+            .map_err(io_to_sql)?;
+    conn.execute(
+        "INSERT INTO wasi_apps (id, name, description, help_text, file_path, file_size, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id,
+            name,
+            description,
+            help_text,
+            file_path,
+            file_size as i64,
+            now
+        ],
+    )?;
+    Ok(WasiApp {
+        id,
+        name: name.to_string(),
+        description: description.to_string(),
+        help_text: help_text.to_string(),
+        file_path,
+        file_size,
+        created_at: now,
+    })
+}
+
 pub fn get_wasi_app(conn: &Connection, id: &str) -> Result<Option<WasiApp>> {
     conn.query_row(
-        "SELECT id, name, description, help_text, file_path, file_size, bytes, created_at FROM wasi_apps WHERE id=?1",
+        "SELECT id, name, description, help_text, file_path, file_size, created_at FROM wasi_apps WHERE id=?1",
         params![id],
         |row| {
-            let id: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let description: String = row.get(2)?;
-            let help_text: String = row.get(3)?;
-            let file_path: String = row.get(4)?;
-            let file_size = row.get::<_, i64>(5)? as u64;
-            let bytes: Option<Vec<u8>> = row.get(6)?;
-            let created_at: String = row.get(7)?;
-            let (file_path, file_size) = maybe_materialize_legacy_wasi_app(conn, &id, &name, &file_path, file_size, bytes)?;
-            Ok(WasiApp { id, name, description, help_text, file_path, file_size, created_at })
+            Ok(WasiApp {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                help_text: row.get(3)?,
+                file_path: row.get(4)?,
+                file_size: row.get::<_, i64>(5)? as u64,
+                created_at: row.get(6)?,
+            })
         },
     )
     .optional()
+}
+
+pub fn import_file_to_temp_storage(source_path: &Path, display_name: &str) -> io::Result<String> {
+    let temp_id = Uuid::new_v4().to_string();
+    let (relative, _) = copy_file_into_storage(
+        source_path,
+        &storage_root().join("temp"),
+        &temp_id,
+        display_name,
+    )?;
+    Ok(relative)
+}
+
+pub fn remove_temp_storage_file(relative: &str) {
+    remove_storage_file(relative);
 }
 
 pub fn update_wasi_app(conn: &Connection, id: &str, description: &str) -> Result<()> {

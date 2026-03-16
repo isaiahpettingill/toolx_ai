@@ -732,7 +732,7 @@ async fn run_wasi_cli(
     module_path: &str,
     module_name: &str,
     cli_args: &str,
-    vfs_root: Option<&PathBuf>,
+    _vfs_root: Option<&PathBuf>,
 ) -> Result<String, String> {
     let (stdout_tx, mut stdout_rx) = Pipe::channel();
     let (stderr_tx, mut stderr_rx) = Pipe::channel();
@@ -752,12 +752,8 @@ async fn run_wasi_cli(
         .args(&args_vec)
         .stdout(Box::new(stdout_tx))
         .stderr(Box::new(stderr_tx));
-    if let Some(vfs_root) = vfs_root {
-        wasi_env_builder = wasi_env_builder
-            .map_dir("workspace", vfs_root)
-            .map_err(|e| format!("Failed to map workspace: {e}"))?
-            .current_dir("/workspace");
-    }
+    
+    // Don't mount real directories - let WASI use its virtual filesystem
     wasi_env_builder.set_engine(engine);
 
     let wasi_env = wasi_env_builder
@@ -812,40 +808,17 @@ async fn run_wasi_cli(
     Ok(output)
 }
 
-pub async fn generate_help_text(wasm_bytes: &[u8], module_name: &str) -> String {
-    let temp_id = format!("help-{}", uuid::Uuid::new_v4());
-    let root = db::storage_root().join("temp");
-    let _ = std::fs::create_dir_all(&root);
-    let temp_path = root.join(format!(
-        "{}-{}.wasm",
-        temp_id,
-        normalize_temp_name(module_name)
-    ));
-    if std::fs::write(&temp_path, wasm_bytes).is_err() {
-        return "No help available".to_string();
-    }
-    let temp_relative = temp_path
-        .strip_prefix(db::storage_root())
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default();
+pub async fn generate_help_text(module_path: &str, module_name: &str) -> String {
     for help_arg in &["-h", "--help", "help"] {
-        let result = run_wasi_cli(&temp_relative, module_name, help_arg, None).await;
+        let result = run_wasi_cli(module_path, module_name, help_arg, None).await;
         if let Ok(output) = result {
             if !output.contains("unrecognized")
                 && !output.contains("unknown")
                 && !output.contains("invalid")
             {
-                let _ = std::fs::remove_file(&temp_path);
                 return output;
             }
         }
     }
-    let _ = std::fs::remove_file(&temp_path);
     "No help available".to_string()
-}
-
-fn normalize_temp_name(name: &str) -> String {
-    name.chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-        .collect()
 }

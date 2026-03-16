@@ -66,7 +66,7 @@ async fn run_wasi(
     module_path: &str,
     module_name: &str,
     messages: &[Message],
-    workspace_root: &std::path::PathBuf,
+    _workspace_root: &std::path::PathBuf,
 ) -> Result<String, ProviderError> {
     // ── Prepare I/O pipes ─────────────────────────────────────────────────────
     let (stdout_tx, mut stdout_rx) = Pipe::channel();
@@ -110,10 +110,8 @@ async fn run_wasi(
         .stdin(Box::new(stdin_rx))
         .stdout(Box::new(stdout_tx))
         .stderr(Box::new(stderr_tx));
-    wasi_env_builder = wasi_env_builder
-        .map_dir("workspace", workspace_root)
-        .map_err(|e| ProviderError::Io(format!("Failed to map workspace: {e}")))?
-        .current_dir("/workspace");
+    
+    // Don't mount real directories - let WASI use its virtual filesystem
     wasi_env_builder.set_engine(engine);
     let wasi_env = wasi_env_builder
         .build()

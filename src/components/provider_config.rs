@@ -1,5 +1,7 @@
+use dioxus::html::FileData;
 use dioxus::prelude::*;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::db::{self, KnowledgeBase, KnowledgeBaseFile, WasiApp, WasmModel};
 use crate::providers;
@@ -7,6 +9,16 @@ use crate::rag;
 use crate::tools;
 
 const SETTING_OLLAMA_URL: &str = "ollama_base_url";
+const AUTO_HELP_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+fn selected_file_path(file: &FileData) -> Option<PathBuf> {
+    let path = file.path();
+    if path.as_os_str().is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
 
 // ── Provider config panel ─────────────────────────────────────────────────────
 
@@ -131,8 +143,17 @@ fn KnowledgeBasesSection(
 
     let mut name = use_signal(String::new);
     let mut description = use_signal(String::new);
-    let available_models = rag::default_embedding_models();
-    let mut embedding_model = use_signal(|| available_models.first().cloned().unwrap_or_default());
+
+    let available_models = use_resource(move || async move {
+        providers::ollama::list_embedding_models(&ollama_base_url.read()).await
+    });
+
+    let model_options = match available_models.read().as_ref() {
+        Some(models) if !models.is_empty() => models.clone(),
+        _ => rag::default_embedding_models(),
+    };
+
+    let mut embedding_model = use_signal(|| model_options.first().cloned().unwrap_or_default());
     let mut upload_error = use_signal(|| Option::<String>::None);
     let mut uploading_kb: Signal<Option<String>> = use_signal(|| None);
     let mut pending_kb_file_delete: Signal<Option<String>> = use_signal(|| None);
@@ -195,7 +216,7 @@ fn KnowledgeBasesSection(
                     class: "config-input",
                     value: "{embedding_model}",
                     onchange: move |e| embedding_model.set(e.value()),
-                    for model in available_models.iter() {
+                    for model in model_options.iter() {
                         option { value: "{model}", "{model}" }
                     }
                 }
@@ -574,19 +595,17 @@ fn WasiSection(
                         spawn(async move {
                             if let Some(file) = file_list.first() {
                                 let name = file.name();
-                                match file.read_bytes().await {
-                                    Ok(bytes) => {
-                                        match db::add_wasm_model(&conn.read(), &name, &bytes) {
-                                            Ok(model) => {
-                                                wasm_models.write().push(model);
-                                            }
-                                            Err(e) => {
-                                                upload_error.set(Some(format!("DB error: {e}")));
-                                            }
+                                match selected_file_path(&file) {
+                                    Some(source_path) => match db::add_wasm_model_from_path(&conn.read(), &name, &source_path) {
+                                        Ok(model) => {
+                                            wasm_models.write().push(model);
                                         }
-                                    }
-                                    Err(e) => {
-                                        upload_error.set(Some(format!("Failed to read file: {e}")));
+                                        Err(e) => {
+                                            upload_error.set(Some(format!("DB error: {e}")));
+                                        }
+                                    },
+                                    None => {
+                                        upload_error.set(Some("Selected file did not expose a readable local path".to_string()));
                                     }
                                 }
                             }
@@ -720,26 +739,49 @@ fn WasiAppsSection(
                         spawn(async move {
                             if let Some(file) = file_list.first() {
                                 let name = file.name();
-                                match file.read_bytes().await {
-                                    Ok(bytes) => {
-                                        let help_text = tools::generate_help_text(&bytes, &name).await;
+                                match selected_file_path(&file) {
+                                    Some(source_path) => {
+                                        let file_size = file.size();
+                                        let should_generate_help = file_size <= AUTO_HELP_MAX_BYTES;
+                                        let help_text = if should_generate_help {
+                                            match db::import_file_to_temp_storage(&source_path, &name) {
+                                                Ok(temp_relative) => {
+                                                    let help = tools::generate_help_text(&temp_relative, &name).await;
+                                                    db::remove_temp_storage_file(&temp_relative);
+                                                    help
+                                                }
+                                                Err(err) => {
+                                                    upload_error.set(Some(format!("Failed to stage file: {err}")));
+                                                    String::new()
+                                                }
+                                            }
+                                        } else {
+                                            String::new()
+                                        };
                                         let description = if help_text.len() > 100 {
                                             format!("{}...", &help_text[..100])
                                         } else {
                                             help_text.clone()
                                         };
 
-                                        match db::add_wasi_app(&conn.read(), &name, &description, &help_text, &bytes) {
+                                        match db::add_wasi_app_from_path(&conn.read(), &name, &description, &help_text, &source_path) {
                                             Ok(app) => {
                                                 wasi_apps.write().push(app);
+                                                if !should_generate_help {
+                                                    upload_error.set(Some(format!(
+                                                        "Uploaded {} without auto-generated help because it is larger than {} MB. You can edit the description manually.",
+                                                        name,
+                                                        AUTO_HELP_MAX_BYTES / (1024 * 1024)
+                                                    )));
+                                                }
                                             }
                                             Err(e) => {
                                                 upload_error.set(Some(format!("DB error: {e}")));
                                             }
                                         }
                                     }
-                                    Err(e) => {
-                                        upload_error.set(Some(format!("Failed to read file: {e}")));
+                                    None => {
+                                        upload_error.set(Some("Selected file did not expose a readable local path".to_string()));
                                     }
                                 }
                             }
