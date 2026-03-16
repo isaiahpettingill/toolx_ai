@@ -233,7 +233,7 @@ pub fn build_agent_preamble(
                 app.description.trim().to_string()
             };
             inventory.push(format!(
-                "- `{tool_name}(args)`: {summary}. User-facing name: `{}`. Pass CLI arguments as one string in `args`; do not mention bash unless this tool's own help explicitly says it provides a shell.",
+                "- `{tool_name}(args)`: {summary}. User-facing name: `{}`. Pass CLI arguments as a single string in `args` using shell-style quoting (e.g., `-c \"code here\"` or `file.txt`); do not mention bash unless this tool's own help explicitly says it provides a shell.",
                 app.name
             ));
         }
@@ -260,7 +260,7 @@ pub fn build_agent_preamble(
 
     if has_wasi_tool(active_tools) {
         notes.push(
-            "WASM-backed tools are normal callable tools. Use their exact tool names from the enabled-tools list, and pass CLI arguments in `args` without repeating the tool name.".to_string()
+            "WASM tools take a shell-style `args` string. Always quote arguments that span multiple lines. Examples: rustpython_wasm with `-c \"print(1)\\nprint(2)\"` (note the double backslash in JSON) or `-c 'print(1)\\nprint(2)'`.".to_string()
         );
     }
 
@@ -709,7 +709,7 @@ impl Tool for WasiAppTool {
                 "properties": {
                     "args": {
                         "type": "string",
-                        "description": format!("Arguments for `{}` as one shell-style string, excluding the tool name itself. Example: `--help` or `input.txt --format json`.", self.name)
+                        "description": format!("Shell-style arguments for {} (exclude tool name). Multi-line: quote it with \\n. Example: `-c \"line1\\nline2\"` or `-c 'line1\\nline2'`", self.name)
                     }
                 }
             }),
@@ -737,8 +737,12 @@ async fn run_wasi_cli(
     let (stdout_tx, mut stdout_rx) = Pipe::channel();
     let (stderr_tx, mut stderr_rx) = Pipe::channel();
 
+    // Parse arguments respecting shell quoting and escaping
+    let parsed_args = shlex::split(cli_args)
+        .ok_or_else(|| "Failed to parse arguments - unbalanced quotes".to_string())?;
+    
     let args_vec: Vec<String> = std::iter::once(module_name.to_string())
-        .chain(cli_args.split_whitespace().map(String::from))
+        .chain(parsed_args.into_iter())
         .collect();
 
     let mut store = Store::default();
@@ -821,4 +825,61 @@ pub async fn generate_help_text(module_path: &str, module_name: &str) -> String 
         }
     }
     "No help available".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_argument_parsing_simple() {
+        let test_cases = vec![
+            // (input, expected_parsed_args)
+            ("--help", vec!["--help"]),
+            ("input.txt --format json", vec!["input.txt", "--format", "json"]),
+            ("-c \"hello world\"", vec!["-c", "hello world"]),
+        ];
+
+        for (input, expected) in test_cases {
+            let parsed = shlex::split(input).expect("Failed to parse");
+            assert_eq!(parsed, expected, "Mismatch for input: {}", input);
+        }
+    }
+
+    #[test]
+    fn test_argument_parsing_quoted() {
+        // Test quoted arguments with special characters
+        let input = "code.py -c 'print(\"hello\")'";
+        let parsed = shlex::split(input).expect("Failed to parse");
+        assert_eq!(parsed, vec!["code.py", "-c", "print(\"hello\")"]);
+    }
+
+    #[test]
+    fn test_argument_parsing_multiline() {
+        // Test that newlines in quoted strings are preserved
+        let input = "-c \"line1\nline2\nline3\"";
+        let parsed = shlex::split(input).expect("Failed to parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], "-c");
+        assert_eq!(parsed[1], "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn test_argument_parsing_escaped_newlines() {
+        // Test that escaped newlines work (JSON may send these)
+        let input = "-c \"line1\\nline2\\nline3\"";
+        let parsed = shlex::split(input).expect("Failed to parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], "-c");
+        // shlex converts \n to actual newline
+        assert_eq!(parsed[1], "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn test_argument_parsing_unbalanced_quotes() {
+        // Test that unbalanced quotes fail gracefully
+        let input = "-c \"unclosed quote";
+        let parsed = shlex::split(input);
+        assert!(parsed.is_none(), "Should fail on unbalanced quotes");
+    }
 }
