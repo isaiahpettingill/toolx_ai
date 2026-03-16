@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use std::collections::HashMap;
 
 use crate::db::{self, WasmModel};
 use crate::providers;
@@ -12,6 +13,7 @@ pub fn ModelSelector(
     mut current_provider: Signal<String>,
     mut ollama_base_url: Signal<String>,
     wasm_models: Signal<Vec<WasmModel>>,
+    last_model_per_provider: Signal<HashMap<String, String>>,
     chat_id: Option<String>,
     on_open_provider_config: EventHandler<()>,
 ) -> Element {
@@ -37,48 +39,78 @@ pub fn ModelSelector(
         div { id: "chat-topbar",
 
             div { id: "provider-tabs",
-                button {
-                    class: if !is_ollama && !is_wasi { "provider-tab provider-tab--active" } else { "provider-tab" },
-                    onclick: move |_| {
-                        current_provider.set(PROVIDER_BUILTIN.to_string());
-                        current_model.set(BUILTIN_MODELS[0].id.to_string());
-                        if let Some(ref id) = chat_id_builtin {
-                            db::update_chat_provider(&conn.read(), id, PROVIDER_BUILTIN).ok();
-                            db::update_chat_model(&conn.read(), id, BUILTIN_MODELS[0].id).ok();
-                        }
-                        model_open.set(false);
-                    },
-                    "Built-in"
-                }
-                button {
-                    class: if is_ollama { "provider-tab provider-tab--active" } else { "provider-tab" },
-                    onclick: move |_| {
-                        current_provider.set(PROVIDER_OLLAMA.to_string());
-                        if let Some(ref id) = chat_id_ollama {
-                            db::update_chat_provider(&conn.read(), id, PROVIDER_OLLAMA).ok();
-                        }
-                        model_open.set(false);
-                    },
-                    "Ollama"
-                }
-                button {
-                    class: if is_wasi { "provider-tab provider-tab--active" } else { "provider-tab" },
-                    onclick: move |_| {
-                        current_provider.set(PROVIDER_WASI.to_string());
-                        // Auto-select the first WASI module if available
-                        if let Some(first) = wasm_models.read().first() {
-                            current_model.set(first.id.clone());
-                            if let Some(ref id) = chat_id_wasi {
-                                db::update_chat_provider(&conn.read(), id, PROVIDER_WASI).ok();
-                                db::update_chat_model(&conn.read(), id, &first.id).ok();
-                            }
-                        } else if let Some(ref id) = chat_id_wasi {
-                            db::update_chat_provider(&conn.read(), id, PROVIDER_WASI).ok();
-                        }
-                        model_open.set(false);
-                    },
-                    "WASI"
-                }
+             button {
+                 class: if !is_ollama && !is_wasi { "provider-tab provider-tab--active" } else { "provider-tab" },
+                 onclick: move |_| {
+                     let new_provider = PROVIDER_BUILTIN.to_string();
+                     let last_model = last_model_per_provider
+                         .read()
+                         .get(&new_provider)
+                         .cloned()
+                         .unwrap_or_else(|| BUILTIN_MODELS[0].id.to_string());
+                     current_provider.set(new_provider);
+                     current_model.set(last_model.clone());
+                     if let Some(ref id) = chat_id_builtin {
+                         db::update_chat_provider(&conn.read(), id, PROVIDER_BUILTIN).ok();
+                         db::update_chat_model(&conn.read(), id, &last_model).ok();
+                     }
+                     model_open.set(false);
+                 },
+                 "Built-in"
+             }
+                 button {
+                     class: if is_ollama { "provider-tab provider-tab--active" } else { "provider-tab" },
+                     onclick: move |_| {
+                         let new_provider = PROVIDER_OLLAMA.to_string();
+                         let last_model = last_model_per_provider
+                             .read()
+                             .get(&new_provider)
+                             .cloned()
+                             .unwrap_or_default();
+                         current_provider.set(new_provider);
+                         if !last_model.is_empty() {
+                             current_model.set(last_model.clone());
+                         }
+                         if let Some(ref id) = chat_id_ollama {
+                             db::update_chat_provider(&conn.read(), id, PROVIDER_OLLAMA).ok();
+                             if !last_model.is_empty() {
+                                 db::update_chat_model(&conn.read(), id, &last_model).ok();
+                             }
+                         }
+                         model_open.set(false);
+                     },
+                     "Ollama"
+                 }
+                 button {
+                     class: if is_wasi { "provider-tab provider-tab--active" } else { "provider-tab" },
+                     onclick: move |_| {
+                         let new_provider = PROVIDER_WASI.to_string();
+                         let last_model = last_model_per_provider
+                             .read()
+                             .get(&new_provider)
+                             .cloned();
+                         current_provider.set(new_provider);
+                         
+                         // Try to use last model, or auto-select first if not available
+                         if let Some(model) = last_model {
+                             current_model.set(model.clone());
+                             if let Some(ref id) = chat_id_wasi {
+                                 db::update_chat_provider(&conn.read(), id, PROVIDER_WASI).ok();
+                                 db::update_chat_model(&conn.read(), id, &model).ok();
+                             }
+                         } else if let Some(first) = wasm_models.read().first() {
+                             current_model.set(first.id.clone());
+                             if let Some(ref id) = chat_id_wasi {
+                                 db::update_chat_provider(&conn.read(), id, PROVIDER_WASI).ok();
+                                 db::update_chat_model(&conn.read(), id, &first.id).ok();
+                             }
+                         } else if let Some(ref id) = chat_id_wasi {
+                             db::update_chat_provider(&conn.read(), id, PROVIDER_WASI).ok();
+                         }
+                         model_open.set(false);
+                     },
+                     "WASI"
+                 }
             }
 
             div { id: "model-selector",

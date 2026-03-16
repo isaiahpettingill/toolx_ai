@@ -60,10 +60,15 @@ pub fn ChatApp() -> Element {
     });
 
     let mut messages: Signal<Vec<UiMessage>> = use_signal(Vec::new);
-    let mut current_model = use_signal(|| "echo:0b".to_string());
-    let mut current_provider = use_signal(|| PROVIDER_BUILTIN.to_string());
-    let mut current_system_prompt = use_signal(String::new);
-    let mut current_tools: Signal<Vec<ChatToolConfig>> = use_signal(Vec::new);
+     let mut current_model = use_signal(|| "echo:0b".to_string());
+     let mut current_provider = use_signal(|| PROVIDER_BUILTIN.to_string());
+     let mut last_model_per_provider: Signal<HashMap<String, String>> = use_signal(|| {
+         let mut m = HashMap::new();
+         m.insert(PROVIDER_BUILTIN.to_string(), "echo:0b".to_string());
+         m
+     });
+     let mut current_system_prompt = use_signal(String::new);
+     let mut current_tools: Signal<Vec<ChatToolConfig>> = use_signal(Vec::new);
     let mut current_embedding_model = use_signal(|| {
         rag::default_embedding_models()
             .into_iter()
@@ -83,45 +88,53 @@ pub fn ChatApp() -> Element {
     let mut renaming_id: Signal<Option<String>> = use_signal(|| None);
     let mut rename_buf = use_signal(|| String::new());
 
-    // Load messages + chat meta whenever active chat changes
-    use_effect(move || {
-        if let Some(id) = active_chat_id.read().clone() {
-            let conn_r = conn.read();
-            let msgs = db::get_messages(&conn_r, &id).unwrap_or_default();
-            messages.set(msgs.iter().map(UiMessage::from_db).collect());
-            if let Some(chat) = db::list_chats(&conn_r)
-                .unwrap_or_default()
-                .into_iter()
-                .find(|c| c.id == id)
-            {
-                current_model.set(chat.model.clone());
-                current_provider.set(chat.provider.clone());
-                current_system_prompt.set(chat.system_prompt.clone());
-                current_tools.set(parse_tool_configs(&chat.tools_json));
-                let embedding_model = if chat.embedding_model.trim().is_empty() {
-                    rag::default_embedding_models()
-                        .into_iter()
-                        .next()
-                        .unwrap_or_default()
-                } else {
-                    chat.embedding_model.clone()
-                };
-                current_embedding_model.set(embedding_model.clone());
-                if chat.embedding_model.trim().is_empty() {
-                    db::update_chat_embedding_model(&conn_r, &id, &embedding_model).ok();
-                }
-                chat_knowledge_bases
-                    .set(db::list_chat_knowledge_bases(&conn_r, &id).unwrap_or_default());
-            }
-        } else {
-            messages.set(Vec::new());
-            current_system_prompt.set(String::new());
-            current_tools.set(Vec::new());
-            chat_knowledge_bases.set(Vec::new());
-        }
-    });
+     // Load messages + chat meta whenever active chat changes
+     use_effect(move || {
+         if let Some(id) = active_chat_id.read().clone() {
+             let conn_r = conn.read();
+             let msgs = db::get_messages(&conn_r, &id).unwrap_or_default();
+             messages.set(msgs.iter().map(UiMessage::from_db).collect());
+             if let Some(chat) = db::list_chats(&conn_r)
+                 .unwrap_or_default()
+                 .into_iter()
+                 .find(|c| c.id == id)
+             {
+                 current_model.set(chat.model.clone());
+                 current_provider.set(chat.provider.clone());
+                 current_system_prompt.set(chat.system_prompt.clone());
+                 current_tools.set(parse_tool_configs(&chat.tools_json));
+                 let embedding_model = if chat.embedding_model.trim().is_empty() {
+                     rag::default_embedding_models()
+                         .into_iter()
+                         .next()
+                         .unwrap_or_default()
+                 } else {
+                     chat.embedding_model.clone()
+                 };
+                 current_embedding_model.set(embedding_model.clone());
+                 if chat.embedding_model.trim().is_empty() {
+                     db::update_chat_embedding_model(&conn_r, &id, &embedding_model).ok();
+                 }
+                 chat_knowledge_bases
+                     .set(db::list_chat_knowledge_bases(&conn_r, &id).unwrap_or_default());
+             }
+         } else {
+             messages.set(Vec::new());
+             current_system_prompt.set(String::new());
+             current_tools.set(Vec::new());
+             chat_knowledge_bases.set(Vec::new());
+         }
+     });
 
-    let new_chat = {
+     // Track last used model for each provider
+     use_effect(move || {
+         let model = current_model();
+         let provider = current_provider();
+         let mut map = last_model_per_provider.write();
+         map.insert(provider, model);
+     });
+
+     let new_chat = {
         let conn = conn.clone();
         move |_: MouseEvent| {
             let model = current_model.read().clone();
@@ -424,6 +437,7 @@ pub fn ChatApp() -> Element {
                         current_provider,
                         ollama_base_url,
                         wasm_models,
+                        last_model_per_provider,
                         chat_id: active_chat_id().clone(),
                         on_open_provider_config: move |_| provider_config_open.set(true),
                     }

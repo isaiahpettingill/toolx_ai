@@ -30,7 +30,7 @@ fn format_bytes(byte_size: u64) -> String {
 #[component]
 pub fn ChatPane(
     conn: Signal<rusqlite::Connection>,
-    chat_id: String,
+    chat_id: ReadSignal<String>,
     mut messages: Signal<Vec<UiMessage>>,
     current_model: Signal<String>,
     current_provider: Signal<String>,
@@ -45,19 +45,19 @@ pub fn ChatPane(
     on_open_tool_picker: EventHandler<MouseEvent>,
     on_messages_changed: EventHandler<()>,
 ) -> Element {
-    let mut input = use_signal(String::new);
-    let mut uploaded_files: Signal<Vec<db::ChatFile>> =
-        use_signal(|| db::list_chat_files(&conn.read(), &chat_id).unwrap_or_default());
+     let mut input = use_signal(String::new);
+     let mut uploaded_files: Signal<Vec<db::ChatFile>> =
+         use_signal(|| db::list_chat_files(&conn.read(), &chat_id()).unwrap_or_default());
     let mut upload_error = use_signal(|| Option::<String>::None);
     let mut uploading_files = use_signal(|| false);
     let mut pending_chat_file_delete: Signal<Option<String>> = use_signal(|| None);
      let mut thinking_expanded = use_signal(|| true);
      let mut citations_expanded = use_signal(|| true);
 
-     let is_streaming = {
-         let chat_id = chat_id.clone();
-         use_memo(move || streaming_chats.read().contains_key(&chat_id))
-     };
+      let is_streaming = {
+          let chat_id = chat_id.clone();
+          use_memo(move || streaming_chats.read().contains_key(&chat_id()))
+      };
 
      let mut sys_prompt_open = use_signal(|| false);
     let mut sys_prompt_draft = use_signal(|| current_system_prompt.read().clone());
@@ -66,11 +66,11 @@ pub fn ChatPane(
         sys_prompt_draft.set(current_system_prompt.read().clone());
     });
 
-    let current_chat_id_for_files = chat_id.clone();
-    use_effect(move || {
-        uploaded_files
-            .set(db::list_chat_files(&conn.read(), &current_chat_id_for_files).unwrap_or_default());
-    });
+     let current_chat_id_for_files = chat_id.clone();
+     use_effect(move || {
+         uploaded_files
+             .set(db::list_chat_files(&conn.read(), &current_chat_id_for_files()).unwrap_or_default());
+     });
 
     let msg_count = messages.read().len();
     let current_chat_id = chat_id.clone();
@@ -88,14 +88,14 @@ pub fn ChatPane(
         move || {
             let text = sys_prompt_draft.read().clone();
             current_system_prompt.set(text.clone());
-            db::update_chat_system_prompt(&conn.read(), &chat_id, &text).ok();
+            db::update_chat_system_prompt(&conn.read(), &chat_id(), &text).ok();
         }
     };
 
     let do_stop = {
         let chat_id = chat_id.clone();
         move || {
-            if let Some(token) = streaming_chats.read().get(&chat_id) {
+            if let Some(token) = streaming_chats.read().get(&chat_id()) {
                 token.store(true, Ordering::Relaxed);
             }
         }
@@ -106,7 +106,7 @@ pub fn ChatPane(
         let chat_id = chat_id.clone();
         move || {
             let text = input.read().trim().to_string();
-            if text.is_empty() || streaming_chats.read().contains_key(&chat_id) {
+            if text.is_empty() || streaming_chats.read().contains_key(&chat_id()) {
                 return;
             }
 
@@ -115,19 +115,19 @@ pub fn ChatPane(
             let system_prompt = current_system_prompt.read().clone();
             let active_tools_list = active_tools.read().clone();
             let wasi_apps_list = wasi_apps.read().clone();
-            let vfs_json = db::get_chat_vfs(&conn.read(), &chat_id).unwrap_or_default();
+            let vfs_json = db::get_chat_vfs(&conn.read(), &chat_id()).unwrap_or_default();
             let vfs_handle = tools::vfs_from_json(
-                &chat_id,
+                &chat_id(),
                 &serde_json::to_string(&vfs_json).unwrap_or_default(),
             );
 
-            if let Ok(user_msg) = db::add_message(&conn.read(), &chat_id, "user", &text) {
+            if let Ok(user_msg) = db::add_message(&conn.read(), &chat_id(), "user", &text) {
                 messages.write().push(UiMessage::from_db(&user_msg));
             }
 
             if messages.read().len() == 1 {
                 let title: String = text.chars().take(40).collect();
-                db::rename_chat(&conn.read(), &chat_id, &title).ok();
+                db::rename_chat(&conn.read(), &chat_id(), &title).ok();
             }
 
             input.set(String::new());
@@ -144,7 +144,7 @@ pub fn ChatPane(
                     .collect();
 
                 let base_url = ollama_base_url.read().clone();
-                let attachments = db::list_chat_files(&conn.read(), &chat_id)
+                let attachments = db::list_chat_files(&conn.read(), &chat_id())
                     .unwrap_or_default()
                     .into_iter()
                     .map(|file| ChatAttachment {
@@ -170,7 +170,7 @@ pub fn ChatPane(
                 let cancel = Arc::new(AtomicBool::new(false));
                 streaming_chats
                     .write()
-                    .insert(chat_id.clone(), cancel.clone());
+                    .insert(chat_id().clone(), cancel.clone());
 
                 let conn2 = conn.clone();
                 let chat_id2 = chat_id.clone();
@@ -178,7 +178,7 @@ pub fn ChatPane(
                 spawn(async move {
                     if cancel.load(Ordering::Relaxed) {
                         messages.write().retain(|m| m.id != stream_id);
-                        streaming_chats.write().remove(&chat_id2);
+                        streaming_chats.write().remove(&chat_id2());
                         on_messages_changed.call(());
                         return;
                     }
@@ -186,7 +186,7 @@ pub fn ChatPane(
                     let retrieved_chunks = match rag::retrieve_for_chat(
                         &conn2.read(),
                         &base_url,
-                        &chat_id2,
+                        &chat_id2(),
                         &embedding_model,
                         &text,
                         6,
@@ -221,7 +221,7 @@ pub fn ChatPane(
                             if !full_content.is_empty() {
                                 if let Ok(saved) = db::add_message_with_citations(
                                     &conn2.read(),
-                                    &chat_id2,
+                                    &chat_id2(),
                                     "assistant",
                                     &full_content,
                                     &retrieved_citations,
@@ -239,7 +239,7 @@ pub fn ChatPane(
                             } else {
                                 messages.write().retain(|m| m.id != stream_id);
                             }
-                            streaming_chats.write().remove(&chat_id2);
+                            streaming_chats.write().remove(&chat_id2());
                             on_messages_changed.call(());
                             return;
                         }
@@ -260,7 +260,7 @@ pub fn ChatPane(
                                 if let Some(final_content) = stream_chunk.final_content {
                                     if let Ok(saved) = db::add_message_with_citations(
                                         &conn2.read(),
-                                        &chat_id2,
+                                        &chat_id2(),
                                         "assistant",
                                         &final_content,
                                         &retrieved_citations,
@@ -279,7 +279,7 @@ pub fn ChatPane(
                                                 .unwrap_or_else(|| retrieved_citations.clone());
                                         }
                                     }
-                                    streaming_chats.write().remove(&chat_id2);
+                                    streaming_chats.write().remove(&chat_id2());
                                     on_messages_changed.call(());
                                     return;
                                 }
@@ -288,7 +288,7 @@ pub fn ChatPane(
                                 let rendered = format!("Error: {e}");
                                 if let Ok(saved) = db::add_message_with_citations(
                                     &conn2.read(),
-                                    &chat_id2,
+                                    &chat_id2(),
                                     "assistant",
                                     &rendered,
                                     &retrieved_citations,
@@ -305,14 +305,14 @@ pub fn ChatPane(
                                         msg.citations = retrieved_citations.clone();
                                     }
                                 }
-                                streaming_chats.write().remove(&chat_id2);
+                                streaming_chats.write().remove(&chat_id2());
                                 on_messages_changed.call(());
                                 return;
                             }
                         }
                     }
 
-                    streaming_chats.write().remove(&chat_id2);
+                    streaming_chats.write().remove(&chat_id2());
                     on_messages_changed.call(());
                 });
             } else if provider == PROVIDER_WASI {
@@ -324,7 +324,7 @@ pub fn ChatPane(
                             model
                         );
                         if let Ok(asst_msg) =
-                            db::add_message(&conn.read(), &chat_id, "assistant", &err)
+                            db::add_message(&conn.read(), &chat_id(), "assistant", &err)
                         {
                             messages.write().push(UiMessage::from_db(&asst_msg));
                         }
@@ -353,7 +353,7 @@ pub fn ChatPane(
                         let cancel = Arc::new(AtomicBool::new(false));
                         streaming_chats
                             .write()
-                            .insert(chat_id.clone(), cancel.clone());
+                            .insert(chat_id().clone(), cancel.clone());
 
                         let conn2 = conn.clone();
                         let chat_id2 = chat_id.clone();
@@ -362,7 +362,7 @@ pub fn ChatPane(
                                 wasm_model.file_path,
                                 wasm_model.name,
                                 history,
-                                db::chat_vfs_root(&chat_id2),
+                                db::chat_vfs_root(&chat_id2()),
                             );
                             let mut full_content = String::new();
 
@@ -371,7 +371,7 @@ pub fn ChatPane(
                                     if !full_content.is_empty() {
                                         if let Ok(saved) = db::add_message(
                                             &conn2.read(),
-                                            &chat_id2,
+                                            &chat_id2(),
                                             "assistant",
                                             &full_content,
                                         ) {
@@ -387,7 +387,7 @@ pub fn ChatPane(
                                     } else {
                                         messages.write().retain(|m| m.id != stream_id);
                                     }
-                                    streaming_chats.write().remove(&chat_id2);
+                                    streaming_chats.write().remove(&chat_id2());
                                     on_messages_changed.call(());
                                     return;
                                 }
@@ -413,7 +413,7 @@ pub fn ChatPane(
                                             msg.html = err_html;
                                             msg.streaming = false;
                                         }
-                                        streaming_chats.write().remove(&chat_id2);
+                                        streaming_chats.write().remove(&chat_id2());
                                         on_messages_changed.call(());
                                         return;
                                     }
@@ -423,7 +423,7 @@ pub fn ChatPane(
 
                             if let Ok(saved) = db::add_message(
                                 &conn2.read(),
-                                &chat_id2,
+                                &chat_id2(),
                                 "assistant",
                                 &full_content,
                             ) {
@@ -434,7 +434,7 @@ pub fn ChatPane(
                                     msg.streaming = false;
                                 }
                             }
-                            streaming_chats.write().remove(&chat_id2);
+                            streaming_chats.write().remove(&chat_id2());
                             on_messages_changed.call(());
                         });
                     }
@@ -442,7 +442,7 @@ pub fn ChatPane(
             } else {
                 let response_text = run_builtin(&model, &text);
                 if let Ok(asst_msg) =
-                    db::add_message(&conn.read(), &chat_id, "assistant", &response_text)
+                    db::add_message(&conn.read(), &chat_id(), "assistant", &response_text)
                 {
                     messages.write().push(UiMessage::from_db(&asst_msg));
                 }
@@ -481,7 +481,7 @@ pub fn ChatPane(
 
                             match db::add_chat_file(
                                 &conn.read(),
-                                &target_chat_id,
+                                &target_chat_id(),
                                 &path,
                                 &name,
                                 &mime_type,
